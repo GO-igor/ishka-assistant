@@ -1,0 +1,444 @@
+[
+ {
+  "type": "function",
+  "function": {
+   "name": "get_schedule",
+   "description": "Расписание пар на день с учётом чётности недели и профиля студента (подгруппа, группа по английскому, курсы (А)).",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "day": {
+      "type": "string",
+      "description": "today | tomorrow | monday..sunday | YYYY-MM-DD"
+     },
+     "group": {
+      "type": "string",
+      "description": "Номер группы, если отличается от группы пользователя"
+     }
+    },
+    "required": [
+     "day"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "find_room",
+   "description": "Где находится аудитория или корпус: адрес, этаж, как дойти, сколько идти пешком.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "room": {
+      "type": "string",
+      "description": "Аудитория, например '412'"
+     },
+     "building": {
+      "type": "string",
+      "description": "Корпус, например '10' или 'главный'"
+     },
+     "from_building": {
+      "type": "string",
+      "description": "Откуда идёт студент, если известно (корпус предыдущей пары)"
+     }
+    },
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "get_teacher",
+   "description": "Кто ведёт предмет у группы (лекции/практики/лабы), контакты и кафедра.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "subject": {
+      "type": "string"
+     },
+     "lesson_type": {
+      "type": "string",
+      "enum": [
+       "лекция",
+       "практика",
+       "лабораторная",
+       "любой"
+      ]
+     }
+    },
+    "required": [
+     "subject"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "add_homework",
+   "description": "Записать Д/З. Хранится 7 дней, напоминание приходит автоматически перед парой по этому предмету.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "subject": {
+      "type": "string"
+     },
+     "task": {
+      "type": "string"
+     },
+     "due": {
+      "type": "string",
+      "description": "next_class (к следующей паре) или YYYY-MM-DD"
+     }
+    },
+    "required": [
+     "subject",
+     "task"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "list_homework",
+   "description": "Показать сохранённые Д/З (за последние 7 дней).",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "subject": {
+      "type": "string"
+     },
+     "due": {
+      "type": "string",
+      "description": "today | tomorrow | YYYY-MM-DD"
+     }
+    },
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "create_reminder",
+   "description": "Напоминание. Укажи ЛИБО относительную задержку (in_minutes/in_hours/in_days), ЛИБО точное время at. Дату бэкенд считает сам.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "text": {
+      "type": "string"
+     },
+     "in_minutes": {
+      "type": "integer"
+     },
+     "in_hours": {
+      "type": "integer"
+     },
+     "in_days": {
+      "type": "integer"
+     },
+     "at": {
+      "type": "string",
+      "description": "Время: 'HH:MM' (ближайшее такое), 'tomorrow HH:MM', 'monday HH:MM' или 'YYYY-MM-DD HH:MM'. Дату вычисляет бэкенд, не модель."
+     }
+    },
+    "required": [
+     "text"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "add_note",
+   "description": "Сохранить заметку без времени.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "text": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "text"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "list_notes",
+   "description": "Найти заметки и активные напоминания.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "query": {
+      "type": "string"
+     }
+    },
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "get_daily_brief",
+   "description": "Данные для брифинга на день: пары с корпусами и переходами, Д/З к этому дню, ближайшие дедлайны и экзамены.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "day": {
+      "type": "string",
+      "description": "today | tomorrow | YYYY-MM-DD"
+     }
+    },
+    "required": [
+     "day"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "set_daily_brief",
+   "description": "Включить/выключить утренний брифинг или поменять время.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "enabled": {
+      "type": "boolean"
+     },
+     "time": {
+      "type": "string",
+      "description": "HH:MM, по умолчанию 07:30"
+     }
+    },
+    "required": [
+     "enabled"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "check_travel_time",
+   "description": "Успеваю ли я: время пешком от текущего места до аудитории следующей (или указанной) пары и сколько минут до её начала.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "from_building": {
+      "type": "string",
+      "description": "Где студент сейчас (корпус)"
+     },
+     "to_room": {
+      "type": "string",
+      "description": "Аудитория, если не следующая пара"
+     },
+     "to_building": {
+      "type": "string",
+      "description": "Корпус, если не следующая пара"
+     }
+    },
+    "required": [
+     "from_building"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "get_exams",
+   "description": "Экзамены и зачёты сессии: даты, время, аудитория, сколько дней осталось.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "subject": {
+      "type": "string",
+      "description": "Предмет, если нужен один"
+     }
+    },
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "make_study_plan",
+   "description": "Составить план повторения билетов к экзамену по дням и поставить напоминания. План считает бэкенд.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "subject": {
+      "type": "string"
+     },
+     "hours_per_day": {
+      "type": "integer",
+      "description": "Сколько часов в день готов заниматься"
+     },
+     "skip_days": {
+      "type": "string",
+      "description": "Дни без занятий, например 'sunday'"
+     }
+    },
+    "required": [
+     "subject"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "add_deadline",
+   "description": "Записать дедлайн лабы, курсовой и т.п. (может быть дальше недели). Напоминания: за 3 дня и за 1 день.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "title": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "kind": {
+      "type": "string",
+      "enum": [
+       "лабораторная",
+       "курсовая",
+       "реферат",
+       "другое"
+      ]
+     },
+     "due": {
+      "type": "string",
+      "description": "YYYY-MM-DD, 'monday', 'next_class' или 'in N days'"
+     }
+    },
+    "required": [
+     "title",
+     "due"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "list_deadlines",
+   "description": "Показать дедлайны лаб и курсовых.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "subject": {
+      "type": "string"
+     },
+     "kind": {
+      "type": "string",
+      "enum": [
+       "лабораторная",
+       "курсовая",
+       "реферат",
+       "другое"
+      ]
+     }
+    },
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "find_food",
+   "description": "Где перекусить рядом: места у корпуса текущей/последней пары, время пешком и хватит ли перемены до следующей пары.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "building": {
+      "type": "string",
+      "description": "Корпус; если не указан — корпус текущей или только что закончившейся пары"
+     }
+    },
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "add_exam",
+   "description": "Внести экзамен или зачёт, который сообщил студент (дата, время, аудитория).",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "subject": {
+      "type": "string"
+     },
+     "kind": {
+      "type": "string",
+      "enum": [
+       "экзамен",
+       "зачёт",
+       "дифзачёт"
+      ]
+     },
+     "date": {
+      "type": "string",
+      "description": "YYYY-MM-DD или '15 января' — нормализует бэкенд"
+     },
+     "time": {
+      "type": "string",
+      "description": "HH:MM"
+     },
+     "room": {
+      "type": "string"
+     },
+     "building": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "subject",
+     "date"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "set_profile",
+   "description": "Сохранить настройки студента: подгруппа, преподаватель по английскому, адаптационные курсы (А).",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "subgroup": {
+      "type": "integer",
+      "enum": [
+       1,
+       2,
+       3
+      ]
+     },
+     "english_teacher": {
+      "type": "string"
+     },
+     "adaptation": {
+      "type": "boolean"
+     }
+    },
+    "required": []
+   }
+  }
+ }
+]

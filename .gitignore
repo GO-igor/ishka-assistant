@@ -1,0 +1,5 @@
+out/
+__pycache__/
+*.gguf
+*.zip
+.ipynb_checkpoints/

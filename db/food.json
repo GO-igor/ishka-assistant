@@ -1,0 +1,42 @@
+{
+ "10": [
+  {
+   "name": "Rostics",
+   "walk_minutes": 2,
+   "where": "прямо напротив корпуса"
+  }
+ ],
+ "ГК": [
+  {
+   "name": "Ярче",
+   "walk_minutes": 7
+  },
+  {
+   "name": "Сибирские блины",
+   "walk_minutes": 7
+  }
+ ],
+ "19": [
+  {
+   "name": "Ярче",
+   "walk_minutes": 7
+  },
+  {
+   "name": "Сибирские блины",
+   "walk_minutes": 7
+  }
+ ],
+ "КЦ": [
+  {
+   "name": "Ярче",
+   "walk_minutes": 7
+  }
+ ],
+ "8": [
+  {
+   "name": "Ярче",
+   "walk_minutes": 7,
+   "where": "недалеко от корпуса"
+  }
+ ]
+}
