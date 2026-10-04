@@ -3,6 +3,7 @@ python gen_dataset.py  ->  data/train.jsonl, data/eval.jsonl
 Формулировки делятся на train и eval (последние 2 в каждом списке — только eval), чтобы eval проверял обобщение.
 Перед обучением ответы стоит перефразировать большой LLM и выборочно проверить руками."""
 import datetime as dt, json, random, pathlib
+import paraphrase
 from backend import Backend, SUBJECTS, BUILDINGS, WD_RU, WEEKDAYS
 
 rnd = random.Random(42)
@@ -315,8 +316,12 @@ def build(n, split):
 if __name__ == "__main__":
     root = pathlib.Path(__file__).parent / "data"
     seed = [json.loads(l)["messages"] for l in open(root / "sample.jsonl", encoding="utf-8")]
+    overlay = paraphrase.load()  # перефразированные ответы (только для train)
     for split, n in (("train", 900), ("eval", 100)):
-        rows = build(n, split) + (seed if split == "train" else [])  # ручные эталоны — в train
+        rows = build(n, split)
+        if split == "train":
+            print("перефразировано:", sum(paraphrase.apply(m, overlay) for m in rows))
+            rows += seed  # ручные эталоны — в train
         rnd.shuffle(rows)
         with open(root / f"{split}.jsonl", "w", encoding="utf-8") as f:
             for m in rows:
