@@ -3,7 +3,8 @@
     pip install unsloth trl datasets
     python validate_dataset.py data/train.jsonl && python train_qlora.py
 """
-import json
+import json, os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # меньше фрагментации памяти
 import torch
 from datasets import Dataset
 from unsloth import FastLanguageModel
@@ -34,7 +35,8 @@ trainer = SFTTrainer(
     train_dataset=ds["train"], eval_dataset=ds["eval"],
     args=SFTConfig(
         dataset_text_field="text", max_length=MAX_LEN,
-        per_device_train_batch_size=2, gradient_accumulation_steps=8,
+        per_device_train_batch_size=1, gradient_accumulation_steps=16,  # пример ~3000 токенов: batch 2 не влезает в T4
+        per_device_eval_batch_size=1,
         num_train_epochs=2, learning_rate=1e-4, lr_scheduler_type="cosine", warmup_steps=10,
         logging_steps=10, eval_strategy="steps", eval_steps=50, save_steps=100,
         output_dir="out", bf16=torch.cuda.is_bf16_supported(), fp16=not torch.cuda.is_bf16_supported(), seed=42, report_to="none"))

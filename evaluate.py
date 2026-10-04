@@ -2,7 +2,7 @@
     python evaluate.py --model out/lora            # дообученная (LoRA)
     python evaluate.py --model unsloth/Qwen3-4B-Instruct-2507   # база, для сравнения
 """
-import argparse, json, re
+import argparse, collections, json, re
 from unsloth import FastLanguageModel
 
 ap = argparse.ArgumentParser()
@@ -27,6 +27,7 @@ def parse_call(text):
 
 norm = lambda v: str(v).lower().strip()
 n = name_ok = args_ok = 0
+per, hit = collections.Counter(), collections.Counter()  # разбивка по инструментам
 for line in list(open(a.data, encoding="utf-8"))[: a.limit]:
     msgs = json.loads(line)["messages"]
     gold = msgs[2]
@@ -36,6 +37,9 @@ for line in list(open(a.data, encoding="utf-8"))[: a.limit]:
     text = tok.decode(out[0][ids["input_ids"].shape[1]:], skip_special_tokens=False)
     call = parse_call(text)
     n += 1
+    key = gold["tool_calls"][0]["function"]["name"] if gold.get("tool_calls") else "без инструмента"
+    per[key] += 1
+    before = args_ok
     if gold.get("tool_calls"):
         g = gold["tool_calls"][0]["function"]
         if call and call.get("name") == g["name"]:
@@ -50,5 +54,9 @@ for line in list(open(a.data, encoding="utf-8"))[: a.limit]:
     else:  # здесь правильно — ответить текстом, без вызова
         name_ok += call is None
         args_ok += call is None
+    hit[key] += args_ok - before
 
 print(f"\nПримеров: {n}\nИнструмент выбран верно: {name_ok / n:.0%}\nИнструмент и аргументы верно: {args_ok / n:.0%}")
+print("\nПо инструментам (инструмент и аргументы верно):")
+for k, v in per.most_common():
+    print(f"  {k}: {hit[k]}/{v}")
