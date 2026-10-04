@@ -14,6 +14,7 @@ a = ap.parse_args()
 TOOLS = json.load(open("tools.json", encoding="utf-8"))
 model, tok = FastLanguageModel.from_pretrained(a.model, max_seq_length=4096, load_in_4bit=True)
 FastLanguageModel.for_inference(model)
+model.generation_config.max_length = None  # иначе на каждый пример предупреждение про max_length
 
 def parse_call(text):
     m = re.search(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", text, re.S)
@@ -31,7 +32,7 @@ for line in list(open(a.data, encoding="utf-8"))[: a.limit]:
     gold = msgs[2]
     prompt = tok.apply_chat_template(msgs[:2], tools=TOOLS, tokenize=False, add_generation_prompt=True)
     ids = tok(prompt, return_tensors="pt").to(model.device)
-    out = model.generate(**ids, max_new_tokens=256, do_sample=False)
+    out = model.generate(**ids, max_new_tokens=256, do_sample=False, temperature=None, top_p=None, top_k=None)
     text = tok.decode(out[0][ids["input_ids"].shape[1]:], skip_special_tokens=False)
     call = parse_call(text)
     n += 1
