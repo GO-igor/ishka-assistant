@@ -10,10 +10,6 @@
      "day": {
       "type": "string",
       "description": "today | tomorrow | monday..sunday | YYYY-MM-DD"
-     },
-     "group": {
-      "type": "string",
-      "description": "Номер группы, если отличается от группы пользователя"
      }
     },
     "required": [
@@ -51,7 +47,7 @@
   "type": "function",
   "function": {
    "name": "get_teacher",
-   "description": "Кто ведёт предмет у группы (лекции/практики/лабы), контакты и кафедра.",
+   "description": "Кто ведёт предмет у студента: лекции, практики, лабы.",
    "parameters": {
     "type": "object",
     "properties": {
@@ -78,7 +74,7 @@
   "type": "function",
   "function": {
    "name": "add_homework",
-   "description": "Записать Д/З. Хранится 7 дней, напоминание приходит автоматически перед парой по этому предмету.",
+   "description": "Записать Д/З. Хранится неделю (дольше, если срок позже). Напоминание: за час до пары по предмету, а если в день сдачи такой пары нет — накануне в 19:00.",
    "parameters": {
     "type": "object",
     "properties": {
@@ -90,7 +86,7 @@
      },
      "due": {
       "type": "string",
-      "description": "next_class (к следующей паре) или YYYY-MM-DD"
+      "description": "next_class (к следующей паре) | tomorrow | monday..saturday (ближайший такой день, не сегодня) | YYYY-MM-DD"
      }
     },
     "required": [
@@ -104,7 +100,7 @@
   "type": "function",
   "function": {
    "name": "list_homework",
-   "description": "Показать сохранённые Д/З (за последние 7 дней).",
+   "description": "Показать Д/З, срок сдачи которых ещё не прошёл.",
    "parameters": {
     "type": "object",
     "properties": {
@@ -287,7 +283,11 @@
      },
      "skip_days": {
       "type": "string",
-      "description": "Дни без занятий, например 'sunday'"
+      "description": "Дни без занятий через запятую: 'sunday' или 'saturday,sunday'"
+     },
+     "tickets_total": {
+      "type": "integer",
+      "description": "Сколько билетов/вопросов, если студент сказал"
      }
     },
     "required": [
@@ -321,7 +321,7 @@
      },
      "due": {
       "type": "string",
-      "description": "YYYY-MM-DD, 'monday', 'next_class' или 'in N days'"
+      "description": "YYYY-MM-DD | tomorrow | monday..saturday (ближайший такой день, не сегодня) | next_class | 'in N days'"
      }
     },
     "required": [
@@ -431,7 +431,8 @@
       ]
      },
      "english_teacher": {
-      "type": "string"
+      "type": "string",
+      "description": "Фамилия преподавателя, как сказал студент; полное ФИО найдёт бэкенд"
      },
      "adaptation": {
       "type": "boolean"

@@ -69,6 +69,15 @@ def check(original: str, para: str, tool_result: str = "") -> list:
             problems.append(f"вердикт «{v}»")
     if "успева" in no and "не успева" not in no and "не успева" in np_:
         problems.append("вердикт перевёрнут")
+    for w in ("сегодня", "завтра", "послезавтра"):  # «напомню завтра» ≠ «напомню сегодня»; убрать можно, если есть дата
+        rw = re.compile(rf"(?<![а-я]){w}(?![а-я])")
+        if rw.search(np_) and not rw.search(no):
+            problems.append(f"появилось «{w}»")
+    for w in ("дифзач", "зачет", "накладк"):
+        if (w in no) != (w in np_):
+            problems.append(f"«{w}…» {'пропало' if w in no else 'появилось'}")
+    if original.count("🔥") != para.count("🔥"):
+        problems.append("метки 🔥")
     if POLITE.search(para):
         problems.append("обращение на «Вы»")
     if not 0.4 * len(original) <= len(para) <= 1.6 * len(original) + 40:

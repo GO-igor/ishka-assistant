@@ -42,7 +42,7 @@ while True:
             args = json.loads(c.function.arguments or "{}")
             try:
                 res = backend.call(c.function.name, args)
-            except Exception as e:  # у тестового бэкенда реализованы не все инструменты
+            except Exception as e:  # модель прислала аргументы, которых нет в схеме
                 res = {"error": f"{type(e).__name__}: {e}"}
             print(f"  [{c.function.name} {args}]")
             msgs.append({"role": "tool", "tool_call_id": c.id, "content": json.dumps(res, ensure_ascii=False)})

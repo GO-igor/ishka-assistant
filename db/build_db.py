@@ -141,7 +141,9 @@ FOOD = {
 }
 
 CALENDAR = {"odd_week_monday": "2026-10-05",  # от неё чётность: через неделю — чётная
-            "slots": {str(k): {"start": a, "end": b} for k, (a, b) in SLOTS.items()}}
+            "slots": {str(k): {"start": a, "end": b} for k, (a, b) in SLOTS.items()},
+            # нерабочие дни (производственный календарь): пар нет
+            "holidays": ["2026-11-04", "2026-12-31"] + [f"2027-01-{d:02d}" for d in range(1, 9)]}
 
 EXAMS_SEED = [  # дат пока нет: «примерно январь»; студенты вносят даты сами через add_exam
  {"subject": "python", "kind": "экзамен", "date": None}, {"subject": "inf", "kind": "экзамен", "date": None},
