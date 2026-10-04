@@ -5,7 +5,7 @@
 """
 import json
 import torch
-from datasets import load_dataset
+from datasets import Dataset
 from unsloth import FastLanguageModel
 from unsloth.chat_templates import train_on_responses_only
 from trl import SFTTrainer, SFTConfig
@@ -20,20 +20,22 @@ model = FastLanguageModel.get_peft_model(
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     use_gradient_checkpointing="unsloth", random_state=42)
 
-def render(ex):
+def load(path):
+    # Читаем JSON сами: load_dataset("json") превращает строки-даты в datetime и
+    # дописывает в аргументы инструментов чужие ключи со значением None.
+    rows = [json.loads(l)["messages"] for l in open(path, encoding="utf-8")]
     # Схема инструментов попадает в system-промпт так же, как на проде
-    return {"text": tok.apply_chat_template(ex["messages"], tools=TOOLS, tokenize=False)}
+    return Dataset.from_list([{"text": tok.apply_chat_template(m, tools=TOOLS, tokenize=False)} for m in rows])
 
-ds = load_dataset("json", data_files={"train": "data/train.jsonl", "eval": "data/eval.jsonl"})
-ds = ds.map(render, remove_columns=ds["train"].column_names)
+ds = {"train": load("data/train.jsonl"), "eval": load("data/eval.jsonl")}
 
 trainer = SFTTrainer(
-    model=model, tokenizer=tok,
+    model=model, processing_class=tok,
     train_dataset=ds["train"], eval_dataset=ds["eval"],
     args=SFTConfig(
-        dataset_text_field="text", max_seq_length=MAX_LEN,
+        dataset_text_field="text", max_length=MAX_LEN,
         per_device_train_batch_size=2, gradient_accumulation_steps=8,
-        num_train_epochs=2, learning_rate=1e-4, lr_scheduler_type="cosine", warmup_ratio=0.05,
+        num_train_epochs=2, learning_rate=1e-4, lr_scheduler_type="cosine", warmup_steps=10,
         logging_steps=10, eval_strategy="steps", eval_steps=50, save_steps=100,
         output_dir="out", bf16=torch.cuda.is_bf16_supported(), fp16=not torch.cuda.is_bf16_supported(), seed=42, report_to="none"))
 
