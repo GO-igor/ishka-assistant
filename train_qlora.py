@@ -10,8 +10,12 @@ from datasets import Dataset
 from unsloth import FastLanguageModel
 from unsloth.chat_templates import train_on_responses_only
 from trl import SFTTrainer, SFTConfig
+from transformers.trainer_utils import get_last_checkpoint
 
-BASE = "unsloth/Qwen3-4B-Instruct-2507"   # слабее GPU → "unsloth/Qwen3-1.7B"
+# Быстрее в ~2 раза, но слабее: BASE=unsloth/Qwen3-1.7B python train_qlora.py
+BASE = os.environ.get("BASE", "unsloth/Qwen3-4B-Instruct-2507")
+# Чекпоинты: в Colab кладём на Google Диск, чтобы после отключения продолжить с места
+CKPT = os.environ.get("CKPT_DIR", "out")
 MAX_LEN = 4096
 TOOLS = json.load(open("tools.json", encoding="utf-8"))
 
@@ -28,7 +32,9 @@ def load(path):
     # Схема инструментов попадает в system-промпт так же, как на проде
     return Dataset.from_list([{"text": tok.apply_chat_template(m, tools=TOOLS, tokenize=False)} for m in rows])
 
-ds = {"train": load("data/train.jsonl"), "eval": load("data/eval.jsonl")}
+# Для кривой loss хватит 40 примеров eval: все 170 заметно тормозят обучение.
+# Качество по всем 170 потом считает evaluate.py.
+ds = {"train": load("data/train.jsonl"), "eval": load("data/eval.jsonl").select(range(40))}
 
 trainer = SFTTrainer(
     model=model, processing_class=tok,
@@ -37,15 +43,18 @@ trainer = SFTTrainer(
         dataset_text_field="text", max_length=MAX_LEN,
         per_device_train_batch_size=1, gradient_accumulation_steps=16,  # пример ~3000 токенов: batch 2 не влезает в T4
         per_device_eval_batch_size=1,
-        num_train_epochs=2, learning_rate=1e-4, lr_scheduler_type="cosine", warmup_steps=10,
-        logging_steps=10, eval_strategy="steps", eval_steps=50, save_steps=100,
-        output_dir="out", bf16=torch.cuda.is_bf16_supported(), fp16=not torch.cuda.is_bf16_supported(), seed=42, report_to="none"))
+        num_train_epochs=1, learning_rate=2e-4, lr_scheduler_type="cosine", warmup_steps=5,
+        logging_steps=5, eval_strategy="steps", eval_steps=40, save_steps=10, save_total_limit=1,
+        output_dir=CKPT, bf16=torch.cuda.is_bf16_supported(), fp16=not torch.cuda.is_bf16_supported(), seed=42, report_to="none"))
 
 # Loss только на ответах ассистента (вызовы инструментов + тексты).
 # Ответы инструментов в шаблоне Qwen идут от роли user, поэтому тоже маскируются.
 trainer = train_on_responses_only(trainer,
     instruction_part="<|im_start|>user\n", response_part="<|im_start|>assistant\n")
-trainer.train()
+# Есть чекпоинт (Colab отключился посреди обучения) → продолжаем с него
+last = get_last_checkpoint(CKPT) if os.path.isdir(CKPT) else None
+if last: print("Продолжаю с", last)
+trainer.train(resume_from_checkpoint=last)
 
 model.save_pretrained("out/lora"); tok.save_pretrained("out/lora")
 # Дальше: python evaluate.py --model out/lora, затем python export.py (GGUF для llama.cpp / Ollama)
