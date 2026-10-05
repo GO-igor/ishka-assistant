@@ -2,13 +2,14 @@
     python evaluate.py --model out/lora            # дообученная (LoRA)
     python evaluate.py --model unsloth/Qwen3-4B-Instruct-2507   # база, для сравнения
 """
-import argparse, collections, json, re
+import argparse, collections, json, re, sys
 from unsloth import FastLanguageModel
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--model", default="out/lora")
 ap.add_argument("--data", default="data/eval.jsonl")
 ap.add_argument("--limit", type=int, default=0, help="сколько примеров (0 — все)")
+ap.add_argument("--max-errors", type=int, default=20, help="сколько ошибок показать (остальные только посчитать)")
 a = ap.parse_args()
 
 TOOLS = json.load(open("tools.json", encoding="utf-8"))
@@ -18,8 +19,8 @@ model.generation_config.max_length = None  # иначе на каждый при
 
 def parse_call(text):
     m = re.search(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", text, re.S)
-    if not m:
-        return None
+    if not m:  # попытка вызова без нормального JSON — это ошибка, а не «ответил текстом»
+        return {"name": "<битый вызов>", "arguments": {}} if "<tool_call>" in text else None
     try:
         return json.loads(m.group(1))
     except json.JSONDecodeError:
@@ -44,8 +45,10 @@ def same_args(ga, pa):
 
 n = name_ok = args_ok = 0
 per, hit = collections.Counter(), collections.Counter()  # разбивка по инструментам
+errors = []
 lines = list(open(a.data, encoding="utf-8"))
-for line in lines[: a.limit or len(lines)]:
+lines = lines[: a.limit or len(lines)]
+for line in lines:
     msgs = json.loads(line)["messages"]
     gold = msgs[2]
     prompt = tok.apply_chat_template(msgs[:2], tools=TOOLS, tokenize=False, add_generation_prompt=True)
@@ -64,17 +67,31 @@ for line in lines[: a.limit or len(lines)]:
         g = gold["tool_calls"][0]["function"]
         if call and call.get("name") == g["name"]:
             name_ok += 1
-            ga, pa = g["arguments"], call.get("arguments", {})
-            if same_args(ga, pa):
+            ga, pa = g["arguments"], call.get("arguments")
+            if isinstance(pa, str):  # аргументы строкой с JSON внутри
+                try:
+                    pa = json.loads(pa)
+                except ValueError:
+                    pass
+            if isinstance(pa, dict) and same_args(ga, pa):
                 args_ok += 1
             else:
-                print(f"[аргументы] {msgs[1]['content']!r}\n  ждали {ga}\n  получили {pa}")
+                errors.append(f"[аргументы] {msgs[1]['content']!r}\n  ждали {ga}\n  получили {pa}")
         else:
-            print(f"[инструмент] {msgs[1]['content']!r}: ждали {g['name']}, получили {call and call.get('name')}")
+            errors.append(f"[инструмент] {msgs[1]['content']!r}: ждали {g['name']}, получили {call and call.get('name')}")
     else:  # здесь правильно — ответить текстом, без вызова
         name_ok += call is None
         args_ok += call is None
+        if call:
+            errors.append(f"[лишний вызов] {msgs[1]['content']!r}: ждали ответ текстом, получили {call.get('name')}")
     hit[key] += args_ok - before
+    if n % 10 == 0 or n == len(lines):
+        print(f"  проверено {n}/{len(lines)}", file=sys.stderr, flush=True)
+
+for e in errors[: a.max_errors]:
+    print(e)
+if len(errors) > a.max_errors:
+    print(f"... и ещё {len(errors) - a.max_errors} ошибок (все: --max-errors 1000)")
 
 print(f"\nПримеров: {n}\nИнструмент выбран верно: {name_ok / n:.0%}\nИнструмент и аргументы верно: {args_ok / n:.0%}")
 print("\nПо инструментам (инструмент и аргументы верно):")

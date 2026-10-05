@@ -35,8 +35,8 @@ def rand_profile():
 def profile_text(p):
     if not p:
         return "не заполнен"
-    return (f"подгруппа {p['subgroup']}, английский — {p['english_teacher']}, "
-            f"курсы (А): {'да' if p['adaptation'] else 'нет'}")
+    return (f"подгруппа {p.get('subgroup') or 'не указана'}, английский — {p.get('english_teacher') or 'не указан'}, "
+            f"курсы (А): {'да' if p.get('adaptation') else 'нет'}")
 
 
 def system(now, p):
