@@ -9,7 +9,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--model", default="out/lora")
 ap.add_argument("--data", default="data/eval.jsonl")
 ap.add_argument("--limit", type=int, default=0, help="сколько примеров (0 — все)")
-ap.add_argument("--max-errors", type=int, default=20, help="сколько ошибок показать (остальные только посчитать)")
+ap.add_argument("--max-errors", type=int, default=20, help="сколько ошибок показать (-1 — все)")
 a = ap.parse_args()
 
 TOOLS = json.load(open("tools.json", encoding="utf-8"))
@@ -46,6 +46,14 @@ def same_args(ga, pa):
 n = name_ok = args_ok = 0
 per, hit = collections.Counter(), collections.Counter()  # разбивка по инструментам
 errors = []
+
+
+def error(text):  # первые --max-errors печатаем сразу, остальные только считаем
+    errors.append(text)
+    if a.max_errors < 0 or len(errors) <= a.max_errors:
+        print(text, flush=True)
+
+
 lines = list(open(a.data, encoding="utf-8"))
 lines = lines[: a.limit or len(lines)]
 for line in lines:
@@ -67,7 +75,7 @@ for line in lines:
         g = gold["tool_calls"][0]["function"]
         if call and call.get("name") == g["name"]:
             name_ok += 1
-            ga, pa = g["arguments"], call.get("arguments")
+            ga, pa = g["arguments"], call.get("arguments") or {}  # у инструментов без аргументов бывает null
             if isinstance(pa, str):  # аргументы строкой с JSON внутри
                 try:
                     pa = json.loads(pa)
@@ -76,22 +84,20 @@ for line in lines:
             if isinstance(pa, dict) and same_args(ga, pa):
                 args_ok += 1
             else:
-                errors.append(f"[аргументы] {msgs[1]['content']!r}\n  ждали {ga}\n  получили {pa}")
+                error(f"[аргументы] {msgs[1]['content']!r}\n  ждали {ga}\n  получили {pa}")
         else:
-            errors.append(f"[инструмент] {msgs[1]['content']!r}: ждали {g['name']}, получили {call and call.get('name')}")
+            error(f"[инструмент] {msgs[1]['content']!r}: ждали {g['name']}, получили {call and call.get('name')}")
     else:  # здесь правильно — ответить текстом, без вызова
         name_ok += call is None
         args_ok += call is None
         if call:
-            errors.append(f"[лишний вызов] {msgs[1]['content']!r}: ждали ответ текстом, получили {call.get('name')}")
+            error(f"[лишний вызов] {msgs[1]['content']!r}: ждали ответ текстом, получили {call.get('name')}")
     hit[key] += args_ok - before
     if n % 10 == 0 or n == len(lines):
         print(f"  проверено {n}/{len(lines)}", file=sys.stderr, flush=True)
 
-for e in errors[: a.max_errors]:
-    print(e)
-if len(errors) > a.max_errors:
-    print(f"... и ещё {len(errors) - a.max_errors} ошибок (все: --max-errors 1000)")
+if 0 <= a.max_errors < len(errors):
+    print(f"... не показано ошибок: {len(errors) - a.max_errors} (показать все: --max-errors -1)")
 
 print(f"\nПримеров: {n}\nИнструмент выбран верно: {name_ok / n:.0%}\nИнструмент и аргументы верно: {args_ok / n:.0%}")
 print("\nПо инструментам (инструмент и аргументы верно):")

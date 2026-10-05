@@ -3,7 +3,7 @@
     pip install unsloth trl datasets
     python validate_dataset.py data/train.jsonl && python train_qlora.py
 """
-import hashlib, json, os
+import hashlib, json, os, re, zipfile
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")  # меньше фрагментации памяти
 import torch
 from datasets import Dataset
@@ -14,37 +14,54 @@ from trl import SFTTrainer, SFTConfig
 # Быстрее в ~2 раза, но слабее: BASE=unsloth/Qwen3-1.7B python train_qlora.py
 BASE = os.environ.get("BASE", "unsloth/Qwen3-4B-Instruct-2507")
 MAX_LEN = 4096
-HP = dict(r=16, lora_alpha=32, epochs=1, lr=2e-4, accum=16, warmup=5)
+# Все настройки обучения здесь: от них зависит имя папки чекпоинтов (меняешь — обучение начнётся заново)
+HP = dict(r=16, lora_alpha=32, lora_dropout=0.0, epochs=1, lr=2e-4, accum=16, batch=1, warmup=5,
+          scheduler="cosine", seed=42,
+          target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
 TOOLS = json.load(open("tools.json", encoding="utf-8"))
 
 # Чекпоинты: в Colab кладём на Google Диск (CKPT_ROOT), чтобы после отключения продолжить с места.
 # Папка называется по отпечатку модели, настроек и данных: другой запуск не подхватит чужой чекпоинт,
 # а новый коммит на GitHub, не меняющий обучение, не начнёт его заново.
-root = os.environ.get("CKPT_ROOT") or os.path.dirname(os.environ.get("CKPT_DIR", "out/x"))
+root = os.environ.get("CKPT_ROOT") or os.path.dirname(os.environ.get("CKPT_DIR", "").rstrip("/")) or "out"
 if root.startswith("/content/drive") and not os.path.isdir("/content/drive/MyDrive"):
     print("⚠️ Google Диск не подключён: чекпоинты будут только в out/ и пропадут при отключении Colab")
     root = "out"
 h = hashlib.sha1(json.dumps([BASE, MAX_LEN, HP]).encode())
-for f in ("data/train.jsonl", "data/eval.jsonl", "tools.json"):
+for f in ("data/train.jsonl", "tools.json"):  # eval на веса не влияет
     h.update(open(f, "rb").read())
 CKPT = os.path.join(root, "ckpt-" + h.hexdigest()[:10])
 
 
+def complete(d):
+    """Чекпоинт записан целиком: при отключении посреди записи на Диске может остаться недописанный."""
+    try:
+        json.load(open(os.path.join(d, "trainer_state.json")))
+        for f in ("optimizer.pt", "scheduler.pt"):  # .pt — zip-архив, testzip сверяет контрольные суммы
+            if zipfile.ZipFile(os.path.join(d, f)).testzip() is not None:
+                return False
+        from safetensors.torch import load_file
+        load_file(os.path.join(d, "adapter_model.safetensors"))
+        return True
+    except Exception:
+        return False
+
+
 def last_checkpoint():
-    """Последний целый чекпоинт: при отключении посреди записи на Диске может остаться недописанный."""
     if not os.path.isdir(CKPT):
         return None
-    need = ("adapter_model.safetensors", "optimizer.pt", "trainer_state.json")
-    done = [d for d in os.listdir(CKPT)
-            if d.startswith("checkpoint-") and all(os.path.isfile(os.path.join(CKPT, d, f)) for f in need)]
-    return os.path.join(CKPT, max(done, key=lambda d: int(d.split("-")[1]))) if done else None
+    steps = sorted((int(m[1]), m[0]) for d in os.listdir(CKPT) if (m := re.fullmatch(r"checkpoint-(\d+)", d)))
+    for _, d in reversed(steps):  # с самого нового; битый пропускаем
+        if complete(os.path.join(CKPT, d)):
+            return os.path.join(CKPT, d)
+        print("Пропускаю недописанный чекпоинт", d)
+    return None
 
 
 model, tok = FastLanguageModel.from_pretrained(BASE, max_seq_length=MAX_LEN, load_in_4bit=True)
 model = FastLanguageModel.get_peft_model(
-    model, r=HP["r"], lora_alpha=HP["lora_alpha"], lora_dropout=0.0,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-    use_gradient_checkpointing="unsloth", random_state=42)
+    model, r=HP["r"], lora_alpha=HP["lora_alpha"], lora_dropout=HP["lora_dropout"],
+    target_modules=HP["target_modules"], use_gradient_checkpointing="unsloth", random_state=HP["seed"])
 
 def load(path):
     # Читаем JSON сами: load_dataset("json") превращает строки-даты в datetime и
@@ -62,11 +79,11 @@ trainer = SFTTrainer(
     train_dataset=ds["train"], eval_dataset=ds["eval"],
     args=SFTConfig(
         dataset_text_field="text", max_length=MAX_LEN,
-        per_device_train_batch_size=1, gradient_accumulation_steps=HP["accum"],  # пример ~2400 токенов, batch 2 не влезает в T4
+        per_device_train_batch_size=HP["batch"], gradient_accumulation_steps=HP["accum"],  # пример ~2400 токенов, batch 2 не влезает в T4
         per_device_eval_batch_size=1,
-        num_train_epochs=HP["epochs"], learning_rate=HP["lr"], lr_scheduler_type="cosine", warmup_steps=HP["warmup"],
+        num_train_epochs=HP["epochs"], learning_rate=HP["lr"], lr_scheduler_type=HP["scheduler"], warmup_steps=HP["warmup"],
         logging_steps=5, eval_strategy="steps", eval_steps=40, save_steps=10, save_total_limit=2,
-        output_dir=CKPT, bf16=torch.cuda.is_bf16_supported(), fp16=not torch.cuda.is_bf16_supported(), seed=42, report_to="none"))
+        output_dir=CKPT, bf16=torch.cuda.is_bf16_supported(), fp16=not torch.cuda.is_bf16_supported(), seed=HP["seed"], report_to="none"))
 
 # Loss только на ответах ассистента (вызовы инструментов + тексты).
 # Ответы инструментов в шаблоне Qwen идут от роли user, поэтому тоже маскируются.

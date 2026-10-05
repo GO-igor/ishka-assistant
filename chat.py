@@ -1,6 +1,6 @@
 """Чат с моделью в терминале: модель + настоящие инструменты из backend.py.
 Нужен сервер с OpenAI-совместимым API, например:
-    llama-server -m ishka-Q4_K_M.gguf --jinja --port 8080          (llama.cpp)
+    llama-server -m ishka-Q4_K_M.gguf --jinja --port 8080 -c 8192  (llama.cpp)
     vllm serve out/merged --served-model-name ishka --enable-auto-tool-choice --tool-call-parser hermes --port 8080
     ollama serve  (тогда --url http://localhost:11434/v1 --name ishka)
 Запуск:  pip install openai && python chat.py --subgroup 2 --english "Аксёнова Н. В."
@@ -29,6 +29,7 @@ if a.subgroup or a.english or a.adaptation:
 profile = backend.profile
 client = OpenAI(base_url=a.url, api_key="local")
 TOOLS = json.load(open("tools.json", encoding="utf-8"))
+NAMES = {t["function"]["name"] for t in TOOLS}
 msgs = [system(now, profile)]
 
 while True:
@@ -44,11 +45,18 @@ while True:
             print("Ишка>", m.content)
             break
         for c in m.tool_calls:
-            args = json.loads(c.function.arguments or "{}")
+            args = c.function.arguments or "{}"
             try:
+                while isinstance(args, str):  # иногда JSON приходит упакованным в строку дважды
+                    args = json.loads(args or "{}")
+                if c.function.name not in NAMES:
+                    raise ValueError(f"нет такого инструмента: {c.function.name}")
+                if not isinstance(args, dict):
+                    raise ValueError("аргументы должны быть объектом")
                 res = backend.call(c.function.name, args)
-            except Exception as e:  # модель прислала аргументы, которых нет в схеме
+            except Exception as e:  # битый JSON, чужой инструмент или аргументы не по схеме
                 res = {"error": f"{type(e).__name__}: {e}"}
             print(f"  [{c.function.name} {args}]")
-            msgs.append({"role": "tool", "tool_call_id": c.id, "content": json.dumps(res, ensure_ascii=False)})
+            msgs.append({"role": "tool", "tool_call_id": c.id,
+                         "content": json.dumps(res, ensure_ascii=False, default=str)})
         msgs[0] = system(now, backend.profile)  # профиль мог поменяться через set_profile
