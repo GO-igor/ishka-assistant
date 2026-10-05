@@ -1,20 +1,47 @@
 """Оценка модели на data/eval.jsonl: правильный ли инструмент и аргументы на первом шаге.
     python evaluate.py --model out/lora            # дообученная (LoRA)
     python evaluate.py --model unsloth/Qwen3-4B-Instruct-2507   # база, для сравнения
+На Mac (MLX, после train_mlx.py):
+    python evaluate.py --mlx --adapter out/mlx_lora            # дообученная
+    python evaluate.py --mlx --model out/mlx_base/Qwen3-4B-Instruct-2507-4bit   # база
 """
-import argparse, collections, json, re
-from unsloth import FastLanguageModel
+import argparse, collections, json, os, re
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--model", default="out/lora")
 ap.add_argument("--data", default="data/eval.jsonl")
 ap.add_argument("--limit", type=int, default=0, help="сколько примеров (0 — все)")
+ap.add_argument("--mlx", action="store_true", help="Mac с Apple Silicon: модель через MLX")
+ap.add_argument("--adapter", help="MLX: папка адаптера, например out/mlx_lora")
 a = ap.parse_args()
 
 TOOLS = json.load(open("tools.json", encoding="utf-8"))
-model, tok = FastLanguageModel.from_pretrained(a.model, max_seq_length=4096, load_in_4bit=True)
-FastLanguageModel.for_inference(model)
-model.generation_config.max_length = None  # иначе на каждый пример предупреждение про max_length
+if a.mlx:
+    from mlx_lm import load
+    from mlx_lm.generate import generate_step
+    import mlx.core as mx
+    base = a.model
+    if a.adapter and base == ap.get_default("model"):  # та же база, на которой учился адаптер
+        base = json.load(open(os.path.join(a.adapter, "adapter_config.json")))["base"]
+    model, tok = load(base, adapter_path=a.adapter)
+
+    def complete(prompt):
+        out = []
+        for t, _ in generate_step(mx.array(tok.encode(prompt, add_special_tokens=False)), model, max_tokens=256):
+            if int(t) in tok.eos_token_ids:
+                break
+            out.append(int(t))
+        return tok.decode(out)
+else:
+    from unsloth import FastLanguageModel
+    model, tok = FastLanguageModel.from_pretrained(a.model, max_seq_length=4096, load_in_4bit=True)
+    FastLanguageModel.for_inference(model)
+    model.generation_config.max_length = None  # иначе на каждый пример предупреждение про max_length
+
+    def complete(prompt):
+        ids = tok(prompt, return_tensors="pt").to(model.device)
+        out = model.generate(**ids, max_new_tokens=256, do_sample=False, temperature=None, top_p=None, top_k=None)
+        return tok.decode(out[0][ids["input_ids"].shape[1]:], skip_special_tokens=False)
 
 def parse_call(text):
     m = re.search(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", text, re.S)
@@ -49,10 +76,7 @@ for line in lines[: a.limit or len(lines)]:
     msgs = json.loads(line)["messages"]
     gold = msgs[2]
     prompt = tok.apply_chat_template(msgs[:2], tools=TOOLS, tokenize=False, add_generation_prompt=True)
-    ids = tok(prompt, return_tensors="pt").to(model.device)
-    out = model.generate(**ids, max_new_tokens=256, do_sample=False, temperature=None, top_p=None, top_k=None)
-    text = tok.decode(out[0][ids["input_ids"].shape[1]:], skip_special_tokens=False)
-    call = parse_call(text)
+    call = parse_call(complete(prompt))
     n += 1
     if gold.get("tool_calls"):
         key = gold["tool_calls"][0]["function"]["name"]
