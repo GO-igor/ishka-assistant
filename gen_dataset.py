@@ -1186,6 +1186,34 @@ def cat_chat(split):
     return [system(now, p), {"role": "user", "content": q}, {"role": "assistant", "content": pick(answers)}]
 
 
+TEXT_EXTRA = None
+
+
+def text_extra():
+    global TEXT_EXTRA
+    if TEXT_EXTRA is None:
+        TEXT_EXTRA = json.loads((pathlib.Path(__file__).parent / "data" / "text_extra.json").read_text(encoding="utf-8"))
+    return TEXT_EXTRA
+
+
+def cat_chat_extra(split):
+    qs, answers = pick(text_extra()["chat"])
+    now, p = rand_now(), rand_profile()
+    return [system(now, p), {"role": "user", "content": pick(qs)}, {"role": "assistant", "content": pick(answers)}]
+
+
+def cat_explain_extra(split):
+    cat_explain(split)  # загрузить EXPLAIN_BANK
+    topic, qs = pick(sorted(text_extra()["explain"].items()))
+    it = next(x for x in EXPLAIN_BANK if x["topic"] == topic)
+    now, p = rand_now(), rand_profile()
+    return [system(now, p), {"role": "user", "content": pick(qs)}, {"role": "assistant", "content": it["answer"]}]
+
+
+# Только train: после первого обучения модель вызывала инструмент даже на «привет» (ответов текстом было 6%)
+TEXT_CATS = [(cat_chat_extra, 55), (cat_explain_extra, 45)]
+
+
 NEW_CATS = [(cat_add_homework, 10), (cat_list_homework, 7), (cat_reminder, 9), (cat_reminder_clarify, 4),
             (cat_note_add, 4), (cat_note_list, 5), (cat_add_deadline, 7), (cat_list_deadlines, 6), (cat_get_exams, 5),
             (cat_study_plan, 6), (cat_brief, 7), (cat_set_brief, 3), (cat_explain, 9), (cat_chat, 5)]
@@ -1225,6 +1253,12 @@ if __name__ == "__main__":
             print("перефразировано (новые):", sum(paraphrase.apply(m, overlay) for m in rows))
         data[split] += rows
         rnd.shuffle(data[split])
+        if split == "train":
+            # 3) Ответы текстом без инструментов (data/text_extra.json) — свой генератор, чтобы не сдвинуть ключи перефразов
+            main_rnd, rnd = rnd, random.Random(3030)
+            data[split] += build(260, split, TEXT_CATS)
+            rnd.shuffle(data[split])
+            rnd = main_rnd  # eval собирается дальше тем же генератором, что и раньше
         with open(root / f"{split}.jsonl", "w", encoding="utf-8") as f:
             for m in data[split]:
                 f.write(json.dumps({"messages": m}, ensure_ascii=False) + "\n")
