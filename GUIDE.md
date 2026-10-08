@@ -96,6 +96,8 @@ python validate_dataset.py data/train.jsonl   # должно быть «Ошиб
 Выбери один вариант.
 
 **A. llama.cpp (рекомендую для начала, работает и без GPU)**
+
+На Mac подробная пошаговая инструкция с установкой — в [RUN_MAC.md](RUN_MAC.md).
 ```bash
 # Windows/Mac/Linux: готовые сборки на github.com/ggml-org/llama.cpp/releases (или brew install llama.cpp)
 llama-server -m ishka-Q4_K_M.gguf --jinja --port 8080 -c 8192
