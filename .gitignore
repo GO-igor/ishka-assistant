@@ -3,3 +3,4 @@ __pycache__/
 *.gguf
 *.zip
 .ipynb_checkpoints/
+diag_gguf_template.jinja
