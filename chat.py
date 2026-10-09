@@ -1,8 +1,9 @@
 """Чат с моделью в терминале: модель + настоящие инструменты из backend.py.
 По умолчанию нужен llama-server (llama.cpp):
     llama-server -m ishka-Q4_K_M.gguf --jinja --port 8080 -c 16384
-chat.py сам собирает промпт ровно как при обучении (prompt_format.py) и шлёт его в /completion,
-так что шаблон чата и разбор вызовов в llama.cpp не участвуют.
+chat.py сам собирает промпт ровно как при обучении (prompt_format.py, шаблон чата берёт из .gguf) и шлёт его
+в /completion, так что шаблон чата и разбор вызовов в llama.cpp не участвуют. Вызвать инструмент или ответить
+текстом, решает по P(<tool_call>) на первом токене ответа (порог CALL_THRESHOLD), а не жадным выбором токена.
 Запуск:  pip install jinja2 && python chat.py --subgroup 2 --english "Аксёнова Н. В."
 Другие серверы (OpenAI-совместимый API, шаблон и вызовы разбирает сервер):
     ollama serve  → pip install openai && python chat.py --api openai --url http://localhost:11434/v1 --name ishka
@@ -12,7 +13,8 @@ chat.py сам собирает промпт ровно как при обуче
 import argparse, datetime as dt, json, unicodedata, urllib.error, urllib.request
 from backend import Backend
 from gen_dataset import system
-from prompt_format import TOOLS, BROKEN, render, parse_calls, answer_text, call_msg, tool_msg
+from prompt_format import (TOOLS, BROKEN, CALL_THRESHOLD, render, answer_prefix, parse_calls, answer_text, call_msg,
+                           tool_msg, first_token_probs, tool_call_prob, pick_template)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--url", default="http://localhost:8080", help="адрес сервера (для --api openai — с /v1)")
@@ -57,8 +59,10 @@ if a.api == "completion" and BASE.endswith("/v1"):
 _http = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # локальный сервер: системный прокси не нужен
 
 
-def post(path, body):
-    req = urllib.request.Request(BASE + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
+def post(path, body=None):
+    """POST с телом body (без тела — GET)."""
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(BASE + path, data, {"Content-Type": "application/json"})
     try:
         with _http.open(req, timeout=900) as r:
             return json.load(r)
@@ -89,11 +93,42 @@ def special_id(text, default):
         return default
 
 
+def model_template():
+    """Шаблон чата из .gguf (с ним модель обучалась) и начало ответа текстом в этом шаблоне:
+    (шаблон или None — тогда chat_template.jinja, начало ответа, ответил ли сервер)."""
+    try:
+        tpl = post("/props").get("chat_template")
+    except ServerError:
+        return None, answer_prefix(), False  # сервер ещё грузит модель или не запущен: спросим перед ответом
+    tpl, prefix, why = pick_template(tpl)
+    if why:
+        print(f"  [{why}: беру chat_template.jinja]")
+    if a.debug:
+        print(f"  [шаблон: {'из .gguf' if tpl else 'chat_template.jinja'}, начало ответа {prefix!r}]")
+    return tpl, prefix, True
+
+
 def generate_completion(force_text):
-    body = {"prompt": render(msgs, add_generation_prompt=True), "n_predict": N_PREDICT,
+    global MODEL_TEMPLATE, ANSWER_PREFIX, TEMPLATE_READY
+    if not TEMPLATE_READY:  # при запуске сервер не ответил
+        MODEL_TEMPLATE, ANSWER_PREFIX, TEMPLATE_READY = model_template()
+    prompt = render(msgs, add_generation_prompt=True, template=MODEL_TEMPLATE)
+    if not force_text:
+        # Сначала один токен с вероятностями. Вызов — это один токен <tool_call>, а текст размазан по тысячам
+        # первых слов, поэтому жадный выбор берёт вызов даже при P = 27%. Решаем по сумме (CALL_THRESHOLD).
+        probs = first_token_probs(post("/completion", {"prompt": prompt, "n_predict": 1, "temperature": 0,
+                                                        "n_probs": 10, "cache_prompt": True}))
+        if probs is not None:  # сервер без вероятностей: остаётся жадный выбор
+            p = tool_call_prob(probs, TOOL_CALL_ID)
+            if a.debug:
+                print(f"  [P(<tool_call>) = {p:.0%}]")
+            force_text = p < CALL_THRESHOLD
+    body = {"prompt": prompt, "n_predict": N_PREDICT,
             "temperature": 0, "stop": ["<|im_end|>"], "cache_prompt": True}  # temperature 0: как при оценке
     if force_text:
-        # Промпт тот же (как при обучении), но токен <tool_call> запрещён: модель может только ответить текстом
+        # Ответ текстом: начинаем его так же, как начинались ответы при обучении (у официального шаблона
+        # Qwen3-2507 это '<think>\n\n</think>\n\n'), и запрещаем токен <tool_call>
+        body["prompt"] = prompt + ANSWER_PREFIX
         body["logit_bias"] = [[TOOL_CALL_ID, False]]
     r = post("/completion", body)
     text = r.get("content") or ""
@@ -146,6 +181,7 @@ if a.api == "openai":
 else:
     generate = generate_completion
     TOOL_CALL_ID = special_id("<tool_call>", 151657)  # заодно проверка, что сервер отвечает
+    MODEL_TEMPLATE, ANSWER_PREFIX, TEMPLATE_READY = model_template()
 
 
 def forget_old(keep):

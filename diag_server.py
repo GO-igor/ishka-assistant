@@ -2,14 +2,15 @@
     python diag_server.py --subgroup 2 --english "Аксёнова Н. В."    # ~2–5 минут
     python diag_server.py --url http://localhost:8081
     python diag_server.py --eval 30         # ещё 30 диалогов из data/eval.jsonl, как evaluate.py (дольше)
-Задаёт модели вопросы из чата с тем же system и профилем, что chat.py: в точном формате обучения
-(prompt_format.py → /completion) и для сравнения так, как это делал старый chat.py (/v1/chat/completions).
-Так видно, где поломка: в самой модели или в том, как промпт собирается и разбирается. Пришли весь вывод целиком.
+Задаёт модели вопросы из чата с тем же system, профилем и шаблоном, что chat.py, и решает «вызов или текст»
+так же, как chat.py: по P(<tool_call>) на первом токене ответа. Для каждого вопроса печатает эту вероятность,
+самые вероятные первые токены и что ответил бы chat.py. Пришли весь вывод целиком.
 """
-import argparse, datetime as dt, json, math, os, sys, unicodedata, urllib.error, urllib.request
+import argparse, datetime as dt, json, os, sys, unicodedata, urllib.error, urllib.request
 from backend import Backend
 from gen_dataset import system
-from prompt_format import HERE, TOOLS, render, parse_calls, answer_text, call_msg, tool_msg, prompt_diff
+from prompt_format import (HERE, TOOLS, CALL_THRESHOLD, render, prompt_diff, parse_calls, answer_text, call_msg,
+                           tool_msg, first_token_probs, tool_call_prob, pick_template)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--url", default="http://localhost:8080")
@@ -24,7 +25,7 @@ BASE = a.url.rstrip("/")
 BASE = BASE[:-3] if BASE.endswith("/v1") else BASE
 _http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 TOOL_CALL, IM_START, BOS = 151657, 151644, 151643  # номера спецтокенов Qwen3
-N_PREDICT = 512
+N_PREDICT = 1024  # как в chat.py
 NAMES = {t["function"]["name"] for t in TOOLS}
 EVAL = [json.loads(l)["messages"] for l in open(os.path.join(HERE, "data", "eval.jsonl"), encoding="utf-8")]
 
@@ -56,21 +57,16 @@ def short(text, n=110):
     return text if len(text) <= n else text[:n] + "…"
 
 
-def first_diff(x, y):
+def first_diff(x, y, names=("обучение", "сервер  ")):
     i = next((i for i, (p, q) in enumerate(zip(x, y)) if p != q), min(len(x), len(y)))
-    return f"символ {i}: обучение {x[max(0, i - 40):i + 40]!r}\n     сервер   {y[max(0, i - 40):i + 40]!r}"
+    return f"символ {i}: {names[0]} {x[max(0, i - 40):i + 40]!r}\n     {names[1]} {y[max(0, i - 40):i + 40]!r}"
 
 
-def outcome(text, calls=None):
+def outcome(text):
     """Что сделала модель: ("call", имя, аргументы), ("text", ответ) или ("empty",)."""
-    calls = calls if calls is not None else parse_calls(text)
+    calls = parse_calls(text)
     if calls:
-        args = calls[0].get("arguments")
-        try:
-            args = json.loads(args) if isinstance(args, str) else args
-        except ValueError:
-            pass
-        return ("call", calls[0].get("name"), args)
+        return ("call", calls[0].get("name"), calls[0].get("arguments"))
     answer = answer_text(text)
     return ("text", answer) if answer else ("empty",)
 
@@ -80,30 +76,68 @@ def describe(o):
             else f"текст: «{short(o[1])}»" if o[0] == "text" else "пустой ответ")
 
 
-def complete(msgs):
-    """Формат обучения: промпт собирает prompt_format.py, генерация как в chat.py (greedy, до <|im_end|>).
-    Возвращает (сырой текст, строка про вероятность <tool_call>, обрезан ли ответ)."""
-    r, err = req("/completion", {"prompt": render(msgs, add_generation_prompt=True), "n_predict": N_PREDICT,
-                                 "temperature": 0, "stop": ["<|im_end|>"], "cache_prompt": True, "n_probs": 5})
+def completion(body):
+    r, err = req("/completion", dict(body, temperature=0, cache_prompt=True))
     if err:
         raise SystemExit(f"✗ /completion: {err}")
-    prob = ""
-    cp = r.get("completion_probabilities") or []
-    if cp:  # новые версии llama.cpp: top_logprobs с logprob, старые: probs с prob
-        p = None
-        for alt in cp[0].get("top_logprobs") or []:
-            if alt.get("id") == TOOL_CALL or alt.get("token") == "<tool_call>":
-                p = math.exp(alt["logprob"])
-        for alt in cp[0].get("top_probs") or cp[0].get("probs") or []:
-            if alt.get("id") == TOOL_CALL or "<tool_call>" in (alt.get("token"), alt.get("tok_str")):
-                p = alt["prob"]
-        prob = f"   [P(<tool_call>) = {p:.0%}]" if p is not None else "   [<tool_call> не в топ-5]"
-    cut = r.get("stop_type") == "limit" or (r.get("tokens_predicted") or 0) >= N_PREDICT
-    return r.get("content") or "", prob, cut
+    return r
+
+
+# Где самым вероятным первым токеном был <tool_call>, но за вызов было меньше порога (chat.py ответил текстом):
+# fixed — так и надо было (старый chat.py тут вызывал инструмент), cut — нужен был вызов, а порог его отменил
+stats = {"fixed": 0, "cut": []}
+
+
+def chat_step(msgs):
+    """Один шаг как в chat.py: первый токен с вероятностями → вызов (P(<tool_call>) ≥ порога) или ответ текстом
+    (начало ответа как при обучении + запрет <tool_call>). Возвращает (сырой текст, P, топ первых токенов,
+    взял бы вызов жадный выбор при P ниже порога, почему ответ обрезан или None)."""
+    prompt = render(msgs, add_generation_prompt=True, template=TPL)
+    probs = first_token_probs(completion({"prompt": prompt, "n_predict": 1, "n_probs": 10}))
+    p = tool_call_prob(probs, TOOL_CALL) if probs is not None else None
+    body = {"prompt": prompt, "n_predict": N_PREDICT, "stop": ["<|im_end|>"]}
+    greedy_call = p is not None and p < CALL_THRESHOLD and bool(probs) and probs[0][0] == TOOL_CALL
+    if p is not None and p < CALL_THRESHOLD:
+        body.update(prompt=prompt + PREFIX, logit_bias=[[TOOL_CALL, False]])
+    r = completion(body)
+    cut = None
+    if r.get("stop_type") == "limit":
+        cut = (f"длиннее {N_PREDICT} токенов" if (r.get("tokens_predicted") or 0) >= N_PREDICT
+               else "кончился контекст сервера, запусти llama-server с -c 16384")
+    return r.get("content") or "", p, probs, greedy_call, cut
+
+
+def count_greedy(greedy_call, call_wanted, label, p):
+    if greedy_call:
+        if call_wanted:
+            stats["cut"].append(f"{label} (P = {p:.0%})")
+        else:
+            stats["fixed"] += 1
+
+
+def probe(msgs, want, label):
+    """want: имя инструмента, None — ждём текст, или множество допустимых вариантов. Возвращает (верно ли, outcome)."""
+    text, p, probs, greedy_call, cut = chat_step(msgs)
+    o = outcome(text)
+    wants = want if isinstance(want, set) else {want}
+    ok = (o[0] == "call" and o[1] in wants) or (o[0] == "text" and None in wants)
+    count_greedy(greedy_call, None not in wants, label, p)
+    need = " или ".join(sorted("текст" if w is None else w for w in wants))
+    print(f"  {'✓' if ok else '✗'} {label} (ждём {need}) → {describe(o)}")
+    if cut:
+        print(f"     [ответ обрезан: {cut}]")
+    if p is None:
+        print("     сервер не прислал вероятности: решение жадное, как раньше")
+    else:
+        top = ", ".join(f"{t!r} {q:.0%}" for _, t, q in probs[:5])
+        print(f"     P(<tool_call>) = {p:.0%} → {'вызов' if p >= CALL_THRESHOLD else 'ответ текстом'}; первые токены: {top}")
+    if not ok:
+        print(f"     сырой ответ: {short(text, 160)!r}" if text else "     сырой ответ: модель вернула пустую строку")
+    return ok, o
 
 
 def to_openai(history):
-    """История в формате обучения -> формат OpenAI, как в chat.py --api openai и в старом chat.py."""
+    """История в формате обучения -> формат OpenAI (для /apply-template)."""
     out, ids = [], []
     for i, m in enumerate(history):
         m = dict(m)
@@ -119,44 +153,6 @@ def to_openai(history):
     return out
 
 
-v1_state = {"err": None, "same": 0, "diff": []}
-
-
-def via_v1(msgs, o, label):
-    """Тот же вопрос через /v1/chat/completions (шаблон и разбор вызовов — llama.cpp). Печатает, совпало ли."""
-    if v1_state["err"]:
-        return
-    r, err = req("/v1/chat/completions", {"model": "ishka", "messages": to_openai(msgs), "tools": TOOLS,
-                                          "temperature": 0, "max_tokens": N_PREDICT})
-    if err:
-        v1_state["err"] = err
-        print(f"     /v1: не ответил ({err}); сравнение через /v1 пропускаю")
-        return
-    m = (r.get("choices") or [{}])[0].get("message") or {}
-    calls = [{"name": c["function"]["name"], "arguments": c["function"]["arguments"]} for c in m.get("tool_calls") or []]
-    o2 = outcome(m.get("content") or "", calls or None)
-    if o2 == o:
-        v1_state["same"] += 1
-        print("     /v1: то же самое")
-    else:
-        v1_state["diff"].append(label)
-        print(f"     /v1: ИНАЧЕ → {describe(o2)}")
-
-
-def probe(msgs, want, label):
-    """Один шаг модели. want: имя инструмента, None — ждём текст, или множество допустимых вариантов.
-    Возвращает (верно ли, что сделала модель)."""
-    text, prob, cut = complete(msgs)
-    o = outcome(text)
-    wants = want if isinstance(want, set) else {want}
-    ok = (o[0] == "call" and o[1] in wants) or (o[0] == "text" and None in wants)
-    need = " или ".join(sorted("текст" if w is None else w for w in wants))
-    print(f"  {'✓' if ok else '✗'} {label} (ждём {need}) → {describe(o)}{prob}{'  [обрезано]' if cut else ''}")
-    print(f"     сырой ответ: {short(text, 160)!r}" if text else "     сырой ответ: модель вернула пустую строку")
-    via_v1(msgs, o, label)
-    return ok, o
-
-
 # ---------- 1. Сервер ----------
 props, err = req("/props")
 if err:
@@ -165,26 +161,27 @@ gen = props.get("default_generation_settings") or {}
 print(f"Сервер: {BASE}\n  модель: {props.get('model_path')}\n  контекст: {gen.get('n_ctx') or props.get('n_ctx')}"
       f"\n  llama.cpp: {props.get('build_info', '?')}\n  профиль: {backend.profile}, сейчас {now:%Y-%m-%d %H:%M}")
 
-# ---------- 2. Шаблон чата в .gguf: собирает ли он те же промпты ----------
-tpl, tpl_ok = props.get("chat_template"), None
-if not tpl:
-    print("? Шаблон чата сервер не показал")
+# ---------- 2. Шаблон чата из .gguf: с ним модель обучалась, его же берёт chat.py ----------
+TPL, PREFIX, why = pick_template(props.get("chat_template"))  # то же, что делает chat.py
+start = f"начинается с {PREFIX!r} (официальный шаблон Qwen3-2507: так модель видела ответы при обучении)" \
+    if PREFIX else "начинается сразу с текста"
+if TPL:
+    print(f"✓ Шаблон чата из .gguf: ответ текстом {start}")
 else:
+    print(f"⚠ {why[0].upper() + why[1:]}: chat.py возьмёт chat_template.jinja, ответ текстом {start}")
     try:
-        d = prompt_diff(tpl, EVAL[:20])
-        tpl_ok = d is None
-        if tpl_ok:
-            print("✓ Шаблон чата в .gguf собирает промпты так же, как при обучении")
-        else:
-            open(os.path.join(HERE, "diag_gguf_template.jinja"), "w", encoding="utf-8").write(tpl)
-            print("✗ Шаблон чата в .gguf собирает промпт НЕ так, как при обучении (сохранён в diag_gguf_template.jinja):\n  "
-                  + first_diff(*d).replace("сервер  ", ".gguf   "))
-    except Exception as e:
-        print(f"? Не получилось собрать промпт по шаблону из .gguf ({type(e).__name__}: {e})")
+        d = props.get("chat_template") and prompt_diff(props["chat_template"], EVAL[:20], gen_only=True)
+        if d:
+            print("  " + first_diff(*d, names=("проект", ".gguf ")))
+    except Exception:
+        pass
 
 # ---------- 3. Спецтокены ----------
 tok_ok = True
-for s, want in (("<|im_start|>", IM_START), ("<tool_call>", TOOL_CALL)):
+specials = [("<|im_start|>", IM_START), ("<tool_call>", TOOL_CALL)]
+if "<think>" in PREFIX:
+    specials += [("<think>", 151667), ("</think>", 151668)]
+for s, want in specials:
     r, err = req("/tokenize", {"content": s, "add_special": False, "parse_special": True})
     ids = (r or {}).get("tokens")
     if ids != [want]:
@@ -197,17 +194,18 @@ if r and (r.get("tokens") or [None])[0] == BOS:
 if tok_ok:
     print("✓ Спецтокены читаются как один токен, BOS не добавляется")
 
-# ---------- 4. Как промпт после инструмента собирает сам llama.cpp (путь /v1, старый chat.py) ----------
+# ---------- 4. Как тот же шаблон собирает сам llama.cpp ----------
 case = next((m for m in EVAL if len(m) > 4 and m[2].get("tool_calls") and m[4].get("content")), None)
 if case:
     r, err = req("/apply-template", {"messages": to_openai(case[:4]), "tools": TOOLS})
+    mine = render(case[:4], add_generation_prompt=True, template=TPL)
     if err:
         print(f"? llama.cpp не собрал промпт сам ({err}); возможно, сервер запущен без --jinja")
-    elif r.get("prompt") == render(case[:4], add_generation_prompt=True):
-        print("✓ llama.cpp собирает промпт после инструмента так же, как при обучении")
+    elif r.get("prompt") == mine:
+        print("✓ llama.cpp собирает промпт после инструмента так же, как chat.py")
     else:
-        print("✗ llama.cpp собирает промпт после инструмента НЕ так, как при обучении:\n  "
-              + first_diff(render(case[:4], add_generation_prompt=True), r.get("prompt") or ""))
+        print("✗ llama.cpp собирает промпт после инструмента НЕ так, как chat.py:\n  "
+              + first_diff(mine, r.get("prompt") or "", names=("chat.py ", "llama.cpp")))
 
 # ---------- 5. Вопросы из чата, с твоим профилем ----------
 LIVE = [("Кто ты?", None), ("Как тебя зовут?", None), ("привет", None), ("объясни рекурсию", None),
@@ -215,8 +213,8 @@ LIVE = [("Кто ты?", None), ("Как тебя зовут?", None), ("при�
 # если модель на шаге 1 не вызвала нужный инструмент, для шага 2 берём такой вызов (как было в чате)
 EXPECTED_CALL = {"get_schedule": {"day": "tomorrow"},
                  "add_exam": {"subject": "Основы Python", "kind": "экзамен", "date": "2027-01-15", "time": "09:00"}}
-print("\nШаг 1 — сразу на вопрос (system и профиль как в chat.py):")
-s1, after = [], []
+print(f"\nШаг 1 — сразу на вопрос (вызов, только если P(<tool_call>) ≥ {CALL_THRESHOLD:.0%}, как в chat.py):")
+s1, s2, after = [], [], []
 for q, want in LIVE:
     msgs = [SYSTEM, {"role": "user", "content": q}]
     ok, o = probe(msgs, want, f"«{q}»")
@@ -227,7 +225,6 @@ for q, want in LIVE:
         after.append((msgs, want, EXPECTED_CALL[want]))  # и нужный вызов, чтобы проверить ответ на его результат
 
 print("Шаг 2 — после результата инструмента (ждём ответ текстом):")
-s2 = []
 for msgs, name, args in after:
     try:
         res = backend.call(name, args)
@@ -249,9 +246,11 @@ if a.eval:
     n1 = ok1 = n2 = ok2 = 0
     errs = []
     for i, m in enumerate(EVAL[: a.eval], 1):
-        o = outcome(complete(m[:2])[0])
+        text, p, _, greedy_call, _ = chat_step(m[:2])
+        o = outcome(text)
         want = m[2]["tool_calls"][0]["function"]["name"] if m[2].get("tool_calls") else None
-        got = o[1] if o[0] == "call" else None
+        got = o[1] if o[0] == "call" else None if o[0] == "text" else "пустой ответ"
+        count_greedy(greedy_call, want, f"eval «{m[1]['content']}»", p)
         n1 += 1
         ok1 += got == want
         if got != want:
@@ -259,37 +258,39 @@ if a.eval:
         for j in range(3, len(m) - 1):
             if m[j]["role"] != "tool" or m[j + 1]["role"] != "assistant":
                 continue
-            o = outcome(complete(m[:j + 1])[0])
+            text, p, _, greedy_call, _ = chat_step(m[:j + 1])
+            o = outcome(text)
             want = m[j + 1]["tool_calls"][0]["function"]["name"] if m[j + 1].get("tool_calls") else None
+            count_greedy(greedy_call, want, f"eval «{m[1]['content']}» после {m[j]['name']}", p)
             good = (o[0] == "call" and o[1] == want) if want else o[0] == "text"
             n2 += 1
             ok2 += good
             if not good:
                 errs.append(f"шаг 2 «{m[1]['content']}» после {m[j]['name']}: ждали {want or 'текст'}, получили {describe(o)}")
         print(f"  проверено диалогов {i}/{min(a.eval, len(EVAL))}", file=sys.stderr, flush=True)
-    print(f"\neval.jsonl, {n1} диалогов: шаг 1 инструмент верно {ok1}/{n1}; шаг 2 верно {ok2}/{n2}")
+    print(f"\neval.jsonl, {n1} диалогов (как chat.py): шаг 1 инструмент верно {ok1}/{n1}; шаг 2 верно {ok2}/{n2}")
     for e in errs[:15]:
         print("  ✗", e)
 
 # ---------- Итог ----------
 print("\nИтог:")
-if tpl_ok is False:
-    print("⚠ Шаблон в .gguf собирает промпт не так, как chat_template.jinja: пришли вывод и файл diag_gguf_template.jinja.")
-if s2 and all(s2):
-    print("✓ После результата инструмента модель отвечает текстом: в этой проверке модель в порядке.\n"
-          "  Запусти chat.py с теми же флагами. Если там снова «Не получилось ответить», пришли и этот вывод, и вывод чата.")
-elif s2 and not any(s2):
-    print("✗ Даже в точном формате обучения модель после результата инструмента не отвечает текстом.\n"
-          "  Значит, дело в весах этого .gguf, а не в llama.cpp и не в chat.py. Дальше — проверка LoRA в Colab (RUN_MAC.md, шаг 7).")
-else:
-    print(f"~ После результата инструмента модель ответила текстом в {sum(s2)} из {len(s2)} случаев: работает нестабильно.\n"
-          "  Пришли этот вывод целиком.")
 bad1 = [q for q, ok in s1 if not ok]
+eval_bad = a.eval and (ok1 < n1 or ok2 < n2)
+if stats["cut"]:
+    print(f"✗ Нужный вызов отменён: за <tool_call> было меньше {CALL_THRESHOLD:.0%}, хотя он был самым вероятным токеном: "
+          + ", ".join(stats["cut"]) + ".")
 if bad1:
-    print("⚠ Шаг 1: " + ", ".join(f"«{q}»" for q in bad1) + " — модель ответила не так, как ждали.")
-if v1_state["diff"]:
-    d = v1_state["diff"]
-    print(f"⚠ Через /v1 (как в старом chat.py) ответ отличался в {len(d)} случаях из {len(d) + v1_state['same']}: "
-          + "; ".join(d[:3]) + ("; …" if len(d) > 3 else ""))
-elif v1_state["same"]:
-    print(f"• Через /v1 (как в старом chat.py) ответы те же ({v1_state['same']} из {v1_state['same']}).")
+    print("⚠ Шаг 1: " + ", ".join(f"«{q}»" for q in bad1) + " — ответ не тот, что ждали. Запиши эти фразы: пример для обучения.")
+if not all(s2):
+    print(f"✗ После результата инструмента правильно в {sum(s2)} из {len(s2)} случаев.")
+elif bad1 or stats["cut"]:
+    print("✓ После результата инструмента модель отвечает текстом.")
+else:
+    print("✓ С новым chat.py модель отвечает правильно на все вопросы из чата: запусти чат (RUN_MAC.md, шаг 6).")
+if a.eval:
+    print(f"{'⚠' if eval_bad else '✓'} eval.jsonl: шаг 1 верно {ok1}/{n1}, шаг 2 верно {ok2}/{n2}" + (" (ошибки выше)" if eval_bad else ""))
+if stats["fixed"]:
+    print(f"• В {stats['fixed']} случаях самым вероятным токеном был <tool_call>, хотя за вызов было меньше "
+          f"{CALL_THRESHOLD:.0%}:\n  старый chat.py вызывал тут инструмент — отсюда «Не получилось ответить». Новый отвечает текстом.")
+if stats["cut"] or bad1 or not all(s2) or eval_bad:
+    print("Пришли этот вывод целиком.")

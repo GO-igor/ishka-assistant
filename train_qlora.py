@@ -10,6 +10,7 @@ from datasets import Dataset
 from unsloth import FastLanguageModel
 from unsloth.chat_templates import train_on_responses_only
 from trl import SFTTrainer, SFTConfig
+from prompt_format import TEMPLATE  # chat_template.jinja
 
 # Быстрее в ~2 раза, но слабее: BASE=unsloth/Qwen3-1.7B python train_qlora.py
 BASE = os.environ.get("BASE", "unsloth/Qwen3-4B-Instruct-2507")
@@ -28,7 +29,7 @@ if root.startswith("/content/drive") and not os.path.isdir("/content/drive/MyDri
     print("⚠️ Google Диск не подключён: чекпоинты будут только в out/ и пропадут при отключении Colab")
     root = "out"
 h = hashlib.sha1(json.dumps([BASE, MAX_LEN, HP]).encode())
-for f in ("data/train.jsonl", "tools.json"):  # eval на веса не влияет
+for f in ("data/train.jsonl", "tools.json", "chat_template.jinja"):  # eval на веса не влияет
     h.update(open(f, "rb").read())
 CKPT = os.path.join(root, "ckpt-" + h.hexdigest()[:10])
 
@@ -59,6 +60,13 @@ def last_checkpoint():
 
 
 model, tok = FastLanguageModel.from_pretrained(BASE, max_seq_length=MAX_LEN, load_in_4bit=True)
+# Шаблон чата закрепляем (chat_template.jinja), а не берём из репозитория модели. Официальный шаблон Qwen3-2507
+# начинает последний ответ ассистента с '<think>\n\n</think>\n\n', а ответы в середине диалога — без него.
+# Первые две модели так и выучили, хотя сама Qwen3-2507 Instruct пустой <think> не пишет: после сжатия в .gguf
+# вероятность <think> упала, и жадный выбор токена стал брать вызов инструмента. С этим шаблоном ответ текстом
+# начинается сразу с текста, как у базовой модели, и без <think> в выводе на любом сервере. Вызов или текст
+# chat.py всё равно решает по вероятности (CALL_THRESHOLD). Шаблон сохранится в out/lora, а оттуда попадёт в .gguf.
+tok.chat_template = TEMPLATE
 model = FastLanguageModel.get_peft_model(
     model, r=HP["r"], lora_alpha=HP["lora_alpha"], lora_dropout=HP["lora_dropout"],
     target_modules=HP["target_modules"], use_gradient_checkpointing="unsloth", random_state=HP["seed"])

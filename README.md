@@ -67,7 +67,7 @@
 | `data/explain_bank.json` | объяснения тем для режима «объясни тему» |
 | `data/text_extra.json` | дополнительные вопросы без инструмента (болтовня, «не по теме», объясни тему), только для train |
 | `train_colab.ipynb`, `evaluate.py`, `export.py`, `chat.py` | обучение в Colab, оценка, экспорт в GGUF, чат с моделью |
-| `chat_template.jinja`, `prompt_format.py` | шаблон чата Qwen3-2507 и сборка промпта ровно как при обучении (для `chat.py`) |
+| `chat_template.jinja`, `prompt_format.py` | шаблон чата Qwen3 для обучения (ответ без пустого `<think>`) и сборка промпта для `chat.py` по шаблону из `.gguf`, ровно как при обучении |
 | `diag_server.py` | проверка модели на запущенном llama-server: шаблон, ответы после инструментов |
 | `GUIDE.md` | пошаговая инструкция |
 | `RUN_MAC.md` | запуск готовой модели на Mac: установка llama.cpp, сервер, чат |
