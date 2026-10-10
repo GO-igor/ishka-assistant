@@ -7,6 +7,8 @@ chat.py сам собирает промпт ровно как при обуче
 Запуск:  pip install jinja2 && python chat.py --subgroup 2 --english "Аксёнова Н. В."
 С аккаунтом (заводится в accounts.py; профиль, Д/З и заметки хранятся в db/ishka.sqlite, работают рассылки старосты):
          python chat.py --login ivanov
+Запретные фразы (db/blocklist.json, guard.py): на такой вопрос Ишка отвечает отказом из списка, ответ модели или
+вызов инструмента с такой фразой не выводится. Список можно править, не закрывая чат.
 Другие серверы (OpenAI-совместимый API, шаблон и вызовы разбирает сервер):
     ollama serve  → pip install openai && python chat.py --api openai --url http://localhost:11434/v1 --name ishka
     vllm serve out/merged --served-model-name ishka --enable-auto-tool-choice --tool-call-parser hermes --port 8080
@@ -15,6 +17,7 @@ chat.py сам собирает промпт ровно как при обуче
 import argparse, datetime as dt, getpass, json, os, unicodedata, urllib.error, urllib.request
 from backend import Backend
 from gen_dataset import system
+from guard import Guard
 from prompt_format import (TOOLS, tools_for, BROKEN, CALL_THRESHOLD, render, answer_prefix, parse_calls, answer_text,
                            call_msg, tool_msg, first_token_probs, tool_call_prob, pick_template)
 
@@ -33,6 +36,9 @@ ap.add_argument("--debug", action="store_true", help="печатать сыро�
 a = ap.parse_args()
 
 now = dt.datetime.fromisoformat(a.now) if a.now else dt.datetime.now().replace(second=0, microsecond=0)
+guard = Guard()  # запретные фразы из db/blocklist.json: в вопросе, в ответе и в вызовах инструментов
+if guard.error:
+    raise SystemExit(f"Не читается список запретных фраз {guard.error.split(';')[0]}. Исправь файл и запусти снова.")
 if a.login:
     from store import DEFAULT_DB, Store
     path = a.db or os.environ.get("ISHKA_DB") or str(DEFAULT_DB)
@@ -69,6 +75,13 @@ FALLBACK = "Не получилось ответить 😅 Попробуй с�
 
 class ContextOverflow(Exception):
     pass
+
+
+class Blocked(Exception):
+    """Модель сама написала запретную фразу (в ответе или в аргументах вызова): такой ход не выводим."""
+    def __init__(self, hit):
+        super().__init__(hit["phrase"])
+        self.hit = hit
 
 
 class ServerError(Exception):
@@ -225,8 +238,8 @@ def ask(force_text):
         print("  [начало диалога забыто: не хватило контекста сервера]")
         text, calls = generate(force_text)
     last_raw[0] = text
-    if a.debug:
-        print(f"  [модель: {text!r}]")
+    if a.debug:  # запретную фразу не показываем и здесь
+        print(f"  [модель: {text!r}]" if not guard.check(text or "") else "  [модель: скрыто, в ответе запретная фраза]")
     return text, calls
 
 
@@ -275,11 +288,29 @@ def answer():
                 print(f"  [повтор {calls[0][0]}: прошу ответить без инструментов]")
                 force_text = True
             else:
+                hit = next(filter(None, (guard.check_obj(args) for _, args in calls)), None)
+                if hit:  # инструмент с запретной фразой не выполняем
+                    raise Blocked(hit)
                 seen.add(key)
                 run_tools(calls)
             continue
-        return answer_text(text) or None  # при force_text лишние вызовы просто отбрасываем
+        clean = answer_text(text)
+        hit = guard.check(clean or text or "")  # пустой ответ: проверяем сырой, его покажем вместо ответа
+        if hit:
+            raise Blocked(hit)
+        return clean or None  # при force_text лишние вызовы просто отбрасываем
     return None
+
+
+def say_blocked(hit, why):
+    """Отказ из списка запретных фраз; пустой answer — промолчать. Какая фраза сработала, видно только с --debug."""
+    if hit["answer"]:
+        print("Ишка>", hit["answer"])
+    if a.debug:
+        print(f"  [{why}: «{hit['phrase']}» из группы «{hit['group']}»]")
+
+
+guard_error = [None]  # о сломанном файле при перечитывании говорим один раз
 
 
 while True:
@@ -287,6 +318,14 @@ while True:
         q = unicodedata.normalize("NFC", input("ты> "))
     except (EOFError, KeyboardInterrupt):
         break
+    hit = guard.check(q)
+    if guard.error != guard_error[0]:
+        guard_error[0] = guard.error
+        if guard.error:
+            print(f"  [{guard.error}]")
+    if hit:  # модели вопрос не показываем и в историю не кладём
+        say_blocked(hit, "запретная фраза в вопросе")
+        continue
     msgs.append({"role": "user", "content": q})
     forget_old(KEEP_TURNS)
     last_raw[0] = ""
@@ -297,6 +336,15 @@ while True:
     except KeyboardInterrupt:  # Ctrl+C во время ответа: вопрос отменяется, чат продолжается
         text, err = None, "прервано"
         print("  [прервано]")
+    except Blocked as e:
+        u = max(i for i, x in enumerate(msgs) if x["role"] == "user")
+        if any(x["role"] == "tool" for x in msgs[u:]):
+            # инструменты уже сработали (например, рассылка ушла): ход оставляем, ответ модели заменяем отказом
+            msgs.append({"role": "assistant", "content": e.hit["answer"] or guard.answer})
+        else:  # ход целиком убираем из истории, чтобы модель не продолжила эту тему
+            del msgs[u:]
+        say_blocked(e.hit, "запретная фраза в ответе модели")
+        continue
     if text:
         msgs.append({"role": "assistant", "content": text})
         print("Ишка>", text)

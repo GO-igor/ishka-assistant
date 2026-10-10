@@ -3,6 +3,7 @@
 Изменяемые данные (Д/З, заметки, напоминания, дедлайны, экзамены) — в памяти; если студент вошёл в аккаунт
 (store + account_id), они сохраняются в db/ishka.sqlite (store.py). Там же рассылки старосты группе."""
 import datetime as dt, json, pathlib, re
+from guard import Guard
 
 DB = pathlib.Path(__file__).parent / "db"
 load = lambda n: json.loads((DB / n).read_text(encoding="utf-8"))
@@ -10,6 +11,7 @@ LESSONS, SUBJECTS, BUILDINGS = load("lessons.json"), load("subjects.json"), load
 ROUTES, WALK, FOOD, CAL = load("routes.json"), load("walk.json"), load("food.json"), load("calendar.json")
 EVENTS = load("events.json")["events"]  # мероприятия и хакатоны; файл заполняется руками
 ADAPT = {"rus_a", "math_a", "eng_a"}
+GUARD = Guard()  # запретные фразы: такие мероприятия и рассылки старосты модели не показываем
 HOLIDAYS = set(CAL.get("holidays", []))
 ENG_TEACHERS = sorted({l["teacher"] for l in LESSONS if l["subject"] == "eng" and l["teacher"]})
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
@@ -548,6 +550,8 @@ class Backend:
                   "from_starosta": True} for p in self._posts("event")]
         items = []
         for e in self.events + group:
+            if GUARD.check_obj(e):  # мероприятие с запретной фразой (например, список пополнили позже) не показываем
+                continue
             left = (dt.date.fromisoformat(e["date"]) - today).days
             if left < 0 or (limit is not None and left > limit) or self._started(e, left):
                 continue
@@ -573,7 +577,9 @@ class Backend:
         """Актуальные рассылки старосты для группы и подгруппы студента (если он вошёл в аккаунт)."""
         if self.store is None or not self.profile.get("group"):
             return []
-        return self.store.posts(self.profile["group"], self.profile.get("subgroup"), after=self._fmt(self.now), kind=kind)
+        posts = self.store.posts(self.profile["group"], self.profile.get("subgroup"), after=self._fmt(self.now), kind=kind)
+        # рассылку с запретной фразой (список могли пополнить уже после неё) студенту не показываем
+        return [p for p in posts if not GUARD.check_obj({k: p.get(k) for k in ("subject", "task", "title", "place", "text")})]
 
     def starosta_news(self):
         """Всё актуальное от старосты: Д/З, мероприятия на 2 недели вперёд, напоминания на неделю вперёд."""
