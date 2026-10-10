@@ -10,7 +10,7 @@ from datasets import Dataset
 from unsloth import FastLanguageModel
 from unsloth.chat_templates import train_on_responses_only
 from trl import SFTTrainer, SFTConfig
-from prompt_format import TEMPLATE  # chat_template.jinja
+from prompt_format import TEMPLATE, tools_for  # chat_template.jinja; инструменты по роли (рассылки — только старосте)
 
 # Быстрее в ~2 раза, но слабее: BASE=unsloth/Qwen3-1.7B python train_qlora.py
 BASE = os.environ.get("BASE", "unsloth/Qwen3-4B-Instruct-2507")
@@ -19,7 +19,6 @@ MAX_LEN = 4096
 HP = dict(r=16, lora_alpha=32, lora_dropout=0.0, epochs=1, lr=2e-4, accum=16, batch=1, warmup=5,
           scheduler="cosine", seed=42,
           target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
-TOOLS = json.load(open("tools.json", encoding="utf-8"))
 
 # Чекпоинты: в Colab кладём на Google Диск (CKPT_ROOT), чтобы после отключения продолжить с места.
 # Папка называется по отпечатку модели, настроек и данных: другой запуск не подхватит чужой чекпоинт,
@@ -75,8 +74,8 @@ def load(path):
     # Читаем JSON сами: load_dataset("json") превращает строки-даты в datetime и
     # дописывает в аргументы инструментов чужие ключи со значением None.
     rows = [json.loads(l)["messages"] for l in open(path, encoding="utf-8")]
-    # Схема инструментов попадает в system-промпт так же, как на проде
-    return Dataset.from_list([{"text": tok.apply_chat_template(m, tools=TOOLS, tokenize=False)} for m in rows])
+    # Схема инструментов попадает в system-промпт так же, как на проде (у студента без рассылок группе)
+    return Dataset.from_list([{"text": tok.apply_chat_template(m, tools=tools_for(m), tokenize=False)} for m in rows])
 
 # Для кривой loss хватит 40 примеров eval: все 170 заметно тормозят обучение.
 # Качество по всем 170 потом считает evaluate.py.

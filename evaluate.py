@@ -7,7 +7,7 @@
 """
 import argparse, collections, json, re, sys
 from unsloth import FastLanguageModel
-from prompt_format import CALL_THRESHOLD, answer_prefix, answer_text, parse_call, prompt_diff  # как в chat.py
+from prompt_format import CALL_THRESHOLD, answer_prefix, answer_text, parse_call, prompt_diff, tools_for  # как в chat.py
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--model", default="out/lora")
@@ -18,7 +18,6 @@ ap.add_argument("--step", type=int, choices=(1, 2), default=1,
                 help="1 — первый ответ на вопрос; 2 — ответ после результата инструмента")
 a = ap.parse_args()
 
-TOOLS = json.load(open("tools.json", encoding="utf-8"))
 model, tok = FastLanguageModel.from_pretrained(a.model, max_seq_length=4096, load_in_4bit=True)
 FastLanguageModel.for_inference(model)
 model.generation_config.max_length = None  # иначе на каждый пример предупреждение про max_length
@@ -28,7 +27,7 @@ TOOL_CALL = tok.convert_tokens_to_ids("<tool_call>")
 print("Шаблон чата модели: ответ текстом " + (f"начинается с {PREFIX!r} (официальный шаблон Qwen3-2507: так модель"
                                                " видела ответы при обучении)" if PREFIX else "начинается сразу с текста"))
 # chat.py собирает промпт сам (prompt_format.py) по шаблону из .gguf, то есть по этому же: проверяем, что так же
-_diff = prompt_diff(lambda m, gen: tok.apply_chat_template(m, tools=TOOLS, tokenize=False, add_generation_prompt=gen),
+_diff = prompt_diff(lambda m, gen: tok.apply_chat_template(m, tools=tools_for(m), tokenize=False, add_generation_prompt=gen),
                     [json.loads(l)["messages"] for l in list(open(a.data, encoding="utf-8"))[:5]], template=TPL)
 if _diff:
     print("⚠️ prompt_format.py собирает шаблон модели не так, как transformers: chat.py будет подавать модели"
@@ -46,7 +45,7 @@ def _generate(prompt, **kw):
 
 def generate(msgs):
     """(ответ по правилу chat.py, жадный ответ, P(<tool_call>) на первом токене)."""
-    prompt = tok.apply_chat_template(msgs, tools=TOOLS, tokenize=False, add_generation_prompt=True)
+    prompt = tok.apply_chat_template(msgs, tools=tools_for(msgs), tokenize=False, add_generation_prompt=True)
     greedy, scores = _generate(prompt, output_scores=True)
     p = scores[0][0].float().softmax(-1)[TOOL_CALL].item() if scores else None
     if p is None or p >= CALL_THRESHOLD or parse_call(greedy) is None:

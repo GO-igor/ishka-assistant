@@ -5,16 +5,18 @@ chat.py сам собирает промпт ровно как при обуче
 в /completion, так что шаблон чата и разбор вызовов в llama.cpp не участвуют. Вызвать инструмент или ответить
 текстом, решает по P(<tool_call>) на первом токене ответа (порог CALL_THRESHOLD), а не жадным выбором токена.
 Запуск:  pip install jinja2 && python chat.py --subgroup 2 --english "Аксёнова Н. В."
+С аккаунтом (заводится в accounts.py; профиль, Д/З и заметки хранятся в db/ishka.sqlite, работают рассылки старосты):
+         python chat.py --login ivanov
 Другие серверы (OpenAI-совместимый API, шаблон и вызовы разбирает сервер):
     ollama serve  → pip install openai && python chat.py --api openai --url http://localhost:11434/v1 --name ishka
     vllm serve out/merged --served-model-name ishka --enable-auto-tool-choice --tool-call-parser hermes --port 8080
                   → python chat.py --api openai
 """
-import argparse, datetime as dt, json, unicodedata, urllib.error, urllib.request
+import argparse, datetime as dt, getpass, json, os, unicodedata, urllib.error, urllib.request
 from backend import Backend
 from gen_dataset import system
-from prompt_format import (TOOLS, BROKEN, CALL_THRESHOLD, render, answer_prefix, parse_calls, answer_text, call_msg,
-                           tool_msg, first_token_probs, tool_call_prob, pick_template)
+from prompt_format import (TOOLS, tools_for, BROKEN, CALL_THRESHOLD, render, answer_prefix, parse_calls, answer_text,
+                           call_msg, tool_msg, first_token_probs, tool_call_prob, pick_template)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--url", default="http://localhost:8080", help="адрес сервера (для --api openai — с /v1)")
@@ -25,12 +27,33 @@ ap.add_argument("--subgroup", type=int)
 ap.add_argument("--english")
 ap.add_argument("--adaptation", action="store_true")
 ap.add_argument("--now", help="подменить текущее время: '2026-10-06 12:10'")
+ap.add_argument("--login", help="войти в аккаунт (пароль спросит); профиль берётся из аккаунта")
+ap.add_argument("--db", help="база аккаунтов (по умолчанию db/ishka.sqlite)")
 ap.add_argument("--debug", action="store_true", help="печатать сырой ответ модели")
 a = ap.parse_args()
 
 now = dt.datetime.fromisoformat(a.now) if a.now else dt.datetime.now().replace(second=0, microsecond=0)
-backend = Backend(now, {})
-if a.subgroup or a.english or a.adaptation:
+if a.login:
+    from store import DEFAULT_DB, Store
+    path = a.db or os.environ.get("ISHKA_DB") or str(DEFAULT_DB)
+    if not os.path.exists(path):
+        raise SystemExit(f"Базы аккаунтов {path} нет: сначала заведи аккаунт, например\n"
+                         f"  python accounts.py add {a.login} --group 8К51")
+    store = Store(path)
+    password = os.environ.get("ISHKA_PASSWORD")  # для проверок без ввода руками
+    if password is None:
+        password = getpass.getpass("пароль: ")
+    acc = store.check_login(unicodedata.normalize("NFC", a.login), password)
+    if not acc:
+        raise SystemExit("Неверный логин или пароль")
+    if a.subgroup or a.english or a.adaptation:
+        print("  [профиль берётся из аккаунта: --subgroup, --english и --adaptation не нужны]")
+    backend = Backend(now, store.profile(acc), store, acc["id"])
+    print(f"Привет, {acc['name'] or acc['login']}! Группа {acc['grp']}" + (
+        ", ты староста: можешь отправлять группе Д/З, мероприятия и напоминания." if acc["role"] == "starosta" else "."))
+else:
+    backend = Backend(now, {})
+if not a.login and (a.subgroup or a.english or a.adaptation):
     # через set_profile, как в диалоге: «Аксёнова» или «Аксенова» превратится в полное ФИО из расписания
     english = unicodedata.normalize("NFC", a.english) if a.english else None  # «ё» из терминала бывает двумя символами
     r = backend.set_profile(subgroup=a.subgroup, english_teacher=english, adaptation=a.adaptation)
@@ -157,7 +180,7 @@ def to_openai(history):
 
 
 def generate_openai(force_text):
-    kw = dict(model=a.name, messages=to_openai(msgs), tools=TOOLS, temperature=0,
+    kw = dict(model=a.name, messages=to_openai(msgs), tools=tools_for(msgs), temperature=0,
               tool_choice="none" if force_text else "auto")
     try:
         m = client.chat.completions.create(**kw).choices[0].message

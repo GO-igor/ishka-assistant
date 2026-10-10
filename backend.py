@@ -1,18 +1,23 @@
 """Эталонная реализация инструментов поверх db/*.json.
 Нужна генератору датасета (ответы инструментов — настоящие) и как основа будущего бэкенда.
-Изменяемые данные (Д/З, заметки, напоминания, дедлайны, экзамены) — в памяти; на проде — PostgreSQL."""
+Изменяемые данные (Д/З, заметки, напоминания, дедлайны, экзамены) — в памяти; если студент вошёл в аккаунт
+(store + account_id), они сохраняются в db/ishka.sqlite (store.py). Там же рассылки старосты группе."""
 import datetime as dt, json, pathlib, re
 
 DB = pathlib.Path(__file__).parent / "db"
 load = lambda n: json.loads((DB / n).read_text(encoding="utf-8"))
 LESSONS, SUBJECTS, BUILDINGS = load("lessons.json"), load("subjects.json"), load("buildings.json")
 ROUTES, WALK, FOOD, CAL = load("routes.json"), load("walk.json"), load("food.json"), load("calendar.json")
+EVENTS = load("events.json")["events"]  # мероприятия и хакатоны; файл заполняется руками
 ADAPT = {"rus_a", "math_a", "eng_a"}
 HOLIDAYS = set(CAL.get("holidays", []))
 ENG_TEACHERS = sorted({l["teacher"] for l in LESSONS if l["subject"] == "eng" and l["teacher"]})
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 WD_RU = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
 EAT_MINUTES = 15  # сколько нужно на сам перекус
+EVENT_KINDS = ["хакатон", "конференция", "олимпиада", "конкурс", "мастер-класс"]
+EVENT_PERIODS = {"week": 7, "month": 31, "all": None}  # сколько дней вперёд смотреть
+SAVE_AFTER = {"add_homework", "create_reminder", "add_note", "add_deadline", "add_exam", "set_daily_brief"}
 MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
 
 
@@ -67,9 +72,24 @@ def walk_minutes(a, b):
 
 
 class Backend:
-    def __init__(self, now: dt.datetime, profile: dict):
-        self.now, self.profile = now, profile  # profile: subgroup, english_teacher, adaptation
+    def __init__(self, now: dt.datetime, profile: dict, store=None, account_id=None):
+        # profile: subgroup, english_teacher, adaptation; у вошедших в аккаунт ещё group и role (student|starosta)
+        self.now, self.profile = now, profile
+        self.store, self.account_id = store, account_id  # store.Store; без них всё живёт до конца сеанса
         self.homework, self.notes, self.reminders, self.deadlines, self.exams = [], [], [], [], []
+        self.brief = {"enabled": True, "time": "07:30"}
+        self.events = EVENTS
+        if store is not None and account_id is not None:
+            data = store.load_data(account_id)
+            for k in ("homework", "notes", "reminders", "deadlines", "exams"):
+                setattr(self, k, data.get(k, []))
+            self.brief = data.get("brief", self.brief)
+
+    def save(self):
+        if self.store is not None and self.account_id is not None:
+            self.store.save_data(self.account_id, {"homework": self.homework, "notes": self.notes,
+                                                   "reminders": self.reminders, "deadlines": self.deadlines,
+                                                   "exams": self.exams, "brief": self.brief})
 
     # ---------- даты ----------
     def parse_day(self, day: str) -> dt.date:
@@ -333,9 +353,8 @@ class Backend:
         return None
 
     # ---------- Д/З (хранится 7 дней) ----------
-    def add_homework(self, subject, task, due="next_class"):
-        code = resolve_subject(subject)
-        name = SUBJECTS[code]["name"] if code else subject
+    def _homework_due(self, code, name, due):
+        """Срок Д/З по расписанию: {"due", "remind_at", "expires", "no_class_that_day"} или {"error": ...}."""
         if due == "next_class":
             when = self.next_class_of(code) if code else None
             if when is None:
@@ -358,22 +377,34 @@ class Backend:
             remind = None
         due_d = dt.date.fromisoformat(due_s[:10])
         expires = max(self.now.date() + dt.timedelta(days=7), due_d + dt.timedelta(days=1)).isoformat()
-        self.homework.append({"code": code, "subject": name, "task": task, "due": due_s, "expires": expires})
-        out = {"ok": True, "subject": name, "due": due_s, "remind_at": remind, "expires": expires}
-        if code and " " not in due_s and not any(l["subject"] == code for l in self.lessons_on(due_d)):  # пары в этот день нет
+        # пары по предмету в этот день нет — срок просто по дате
+        no_class = bool(code and " " not in due_s and not any(l["subject"] == code for l in self.lessons_on(due_d)))
+        return {"due": due_s, "remind_at": remind, "expires": expires, "no_class_that_day": no_class}
+
+    def add_homework(self, subject, task, due="next_class"):
+        code = resolve_subject(subject)
+        name = SUBJECTS[code]["name"] if code else subject
+        r = self._homework_due(code, name, due)
+        if "error" in r:
+            return r
+        self.homework.append({"code": code, "subject": name, "task": task, "due": r["due"], "expires": r["expires"]})
+        out = {"ok": True, "subject": name, "due": r["due"], "remind_at": r["remind_at"], "expires": r["expires"]}
+        if r["no_class_that_day"]:
             out["no_class_that_day"] = True
         return out
 
     def list_homework(self, subject=None, due=None):
-        if subject and not resolve_subject(subject) and not any(self._same_subject(subject, h) for h in self.homework):
+        group = [dict(p, expires=p["due"][:10], from_starosta=True) for p in self._posts("homework")]  # от старосты
+        if subject and not resolve_subject(subject) and not any(self._same_subject(subject, h) for h in self.homework + group):
             return {"error": "subject_not_found", "subject": subject}
         day = self.parse_due(due).isoformat() if due else None
         now_s, today = self._fmt(self.now), self.now.date().isoformat()
-        items = [h for h in self.homework if h["expires"] >= today
+        items = [h for h in self.homework + group if h["expires"] >= today
                  and (h["due"] > now_s if " " in h["due"] else h["due"] >= today)  # срок ещё не прошёл
                  and (not subject or self._same_subject(subject, h))
                  and (not day or h["due"].startswith(day))]
-        return {"items": [{k: h[k] for k in ("subject", "task", "due")} for h in sorted(items, key=lambda h: h["due"])]}
+        return {"items": [{k: h[k] for k in ("subject", "task", "due", "from_starosta") if k in h}
+                          for h in sorted(items, key=lambda h: h["due"])]}
 
     # ---------- напоминания и заметки ----------
     def create_reminder(self, text, in_minutes=None, in_hours=None, in_days=None, at=None):
@@ -403,8 +434,9 @@ class Backend:
             words = re.findall(r"\w+", text.lower().replace("ё", "е"))
             return all(any(w.startswith(s) for w in words) for s in stems)
         now_s = self._fmt(self.now)
+        group = [{"text": p["text"], "fire_at": p["fire_at"], "from_starosta": True} for p in self._posts("reminder")]
         return {"notes": [n for n in self.notes if hit(n)],
-                "reminders": sorted((r for r in self.reminders if r["fire_at"] > now_s and hit(r["text"])),
+                "reminders": sorted((r for r in self.reminders + group if r["fire_at"] > now_s and hit(r["text"])),
                                     key=lambda r: r["fire_at"])}
 
     # ---------- дедлайны лаб и курсовых ----------
@@ -470,7 +502,8 @@ class Backend:
 
     # ---------- брифинг ----------
     def set_daily_brief(self, enabled, time=None):
-        return {"ok": True, "enabled": enabled, "time": (time or "07:30") if enabled else None}
+        self.brief = {"enabled": enabled, "time": (time or "07:30") if enabled else None}
+        return {"ok": True, "enabled": enabled, "time": self.brief["time"]}
 
     def get_daily_brief(self, day="today"):
         s = self.get_schedule(day)
@@ -485,6 +518,9 @@ class Backend:
         s["homework"] = self.list_homework(due=d.isoformat())["items"]
         s["deadlines"] = [x for x in self.list_deadlines()["items"] if x["days_left"] <= 7]
         s["exams"] = [x for x in self.get_exams()["items"] if 0 <= x["days_left"] <= 14]
+        fs = self.starosta_news()
+        if fs:  # отдельной строкой в брифинге
+            s["from_starosta"] = fs
         return s
 
     def set_profile(self, subgroup=None, english_teacher=None, adaptation=None):
@@ -497,7 +533,138 @@ class Backend:
         for k, v in (("subgroup", subgroup), ("english_teacher", english_teacher), ("adaptation", adaptation)):
             if v is not None:
                 self.profile[k] = v
-        return {"ok": True, "profile": dict(self.profile)}
+        if self.store is not None and self.account_id is not None:
+            self.store.save_profile(self.account_id, self.profile)
+        return {"ok": True, "profile": {k: v for k, v in self.profile.items() if k not in ("group", "role")}}
+
+    # ---------- мероприятия и хакатоны ----------
+    def get_events(self, kind=None, period="month"):
+        today, limit = self.now.date(), EVENT_PERIODS.get(period, 31)
+        group = [{"title": p["title"], "date": p["date"], "time": p.get("time"), "place": p.get("place"),
+                  "from_starosta": True} for p in self._posts("event")]
+        items = []
+        for e in self.events + group:
+            left = (dt.date.fromisoformat(e["date"]) - today).days
+            if left < 0 or (limit is not None and left > limit):
+                continue
+            if kind and e.get("kind") != kind and kind.lower()[:6] not in e["title"].lower():
+                continue
+            o = {k: e[k] for k in ("title", "kind", "date", "time", "place", "description", "url") if e.get(k)}
+            o["days_left"] = left
+            if e.get("from_starosta"):
+                o["from_starosta"] = True
+            items.append(o)
+        items.sort(key=lambda o: (o["date"], o.get("time") or ""))
+        out = {"items": items[:10]}
+        if len(items) > 10:
+            out["more"] = len(items) - 10
+        return out
+
+    # ---------- рассылки старосты ----------
+    def _posts(self, kind=None):
+        """Актуальные рассылки старосты для группы и подгруппы студента (если он вошёл в аккаунт)."""
+        if self.store is None or not self.profile.get("group"):
+            return []
+        return self.store.posts(self.profile["group"], self.profile.get("subgroup"), after=self._fmt(self.now), kind=kind)
+
+    def starosta_news(self):
+        """Всё актуальное от старосты: Д/З, мероприятия на 2 недели вперёд, напоминания на неделю вперёд."""
+        out, now_s = [], self._fmt(self.now)
+        week = self._fmt(self.now + dt.timedelta(days=7))
+        for p in self._posts():
+            if p["kind"] == "homework":
+                if (p["due"] > now_s if " " in p["due"] else p["due"] >= now_s[:10]):
+                    out.append(({"kind": "homework", "subject": p["subject"], "task": p["task"], "due": p["due"]}, p["due"]))
+            elif p["kind"] == "event":
+                left = (dt.date.fromisoformat(p["date"]) - self.now.date()).days
+                if 0 <= left <= 14:
+                    o = {"kind": "event", "title": p["title"], "date": p["date"]}
+                    o.update({k: p[k] for k in ("time", "place") if p.get(k)})
+                    out.append((o | {"days_left": left}, f"{p['date']} {p.get('time') or ''}"))
+            elif p["kind"] == "reminder" and now_s < p["fire_at"] <= week:
+                out.append(({"kind": "reminder", "text": p["text"], "fire_at": p["fire_at"]}, p["fire_at"]))
+        return [o for o, _ in sorted(out, key=lambda x: x[1])]
+
+    def _starosta(self, subgroup):
+        """None, если можно рассылать, иначе ошибка."""
+        if self.profile.get("role") != "starosta":
+            return {"error": "not_starosta"}
+        if self.store is None or self.account_id is None or not self.profile.get("group"):
+            return {"error": "not_logged_in"}
+        if subgroup is not None and subgroup not in (1, 2, 3):
+            return {"error": "bad_subgroup"}
+        return None
+
+    def _post(self, kind, data, until, subgroup):
+        self.store.add_post(self.account_id, self.profile["group"], kind, data, until, subgroup=subgroup,
+                            created=self._fmt(self.now))
+        out = {"recipients": self.store.members(self.profile["group"], subgroup, exclude=self.account_id)}
+        if subgroup:
+            out["subgroup"] = subgroup
+        return out
+
+    def group_add_homework(self, subject, task, due="next_class", subgroup=None):
+        err = self._starosta(subgroup)
+        if err:
+            return err
+        code = resolve_subject(subject)
+        name = SUBJECTS[code]["name"] if code else subject
+        # «к следующей паре» — по расписанию той подгруппы, которой задали (лабы у подгрупп в разное время)
+        b = self if not subgroup or subgroup == self.profile.get("subgroup") else Backend(self.now, dict(self.profile, subgroup=subgroup))
+        r = b._homework_due(code, name, due or "next_class")
+        if "error" in r:
+            return r
+        until = r["due"] if " " in r["due"] else r["due"] + " 23:59"
+        sent = self._post("homework", {"code": code, "subject": name, "task": task, "due": r["due"]}, until, subgroup)
+        out = {"ok": True, "subject": name, "due": r["due"]}
+        if r["no_class_that_day"]:
+            out["no_class_that_day"] = True
+        return out | sent
+
+    def group_add_event(self, title, date, time=None, place=None, subgroup=None):
+        err = self._starosta(subgroup)
+        if err:
+            return err
+        try:
+            try:
+                d = self.parse_date(date)
+            except (ValueError, StopIteration):
+                d = self.parse_due(date, future=True)  # tomorrow, friday
+        except (ValueError, StopIteration, AttributeError):
+            return {"error": "bad_date"}
+        if time:
+            try:
+                time = dt.time.fromisoformat(time).strftime("%H:%M")
+            except ValueError:
+                return {"error": "bad_time"}
+        left = (d - self.now.date()).days
+        if left < 0 or (left == 0 and time and time <= self.now.strftime("%H:%M")):
+            return {"error": "date_in_past"}
+        data = {"title": title, "date": d.isoformat()}
+        data.update({k: v for k, v in (("time", time), ("place", place)) if v})
+        sent = self._post("event", data, f"{d} 23:59", subgroup)
+        return {"ok": True} | data | {"days_left": left} | sent
+
+    def group_create_reminder(self, text, in_minutes=None, in_hours=None, in_days=None, at=None, subgroup=None):
+        err = self._starosta(subgroup)
+        if err:
+            return err
+        if in_minutes or in_hours or in_days:
+            fire = self.now + dt.timedelta(minutes=in_minutes or 0, hours=in_hours or 0, days=in_days or 0)
+        elif at:
+            try:
+                fire = self.parse_at(at)
+            except ValueError:
+                return {"error": "bad_time"}
+        else:
+            return {"error": "time_required"}
+        if fire <= self.now:
+            return {"error": "time_in_past"}
+        sent = self._post("reminder", {"text": text, "fire_at": self._fmt(fire)}, self._fmt(fire), subgroup)
+        return {"ok": True, "fire_at": self._fmt(fire)} | sent
 
     def call(self, name, args):
-        return getattr(self, name)(**args)
+        res = getattr(self, name)(**args)
+        if name in SAVE_AFTER:
+            self.save()
+        return res

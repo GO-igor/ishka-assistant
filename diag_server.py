@@ -9,8 +9,8 @@
 import argparse, datetime as dt, json, os, sys, unicodedata, urllib.error, urllib.request
 from backend import Backend
 from gen_dataset import system
-from prompt_format import (HERE, TOOLS, CALL_THRESHOLD, render, prompt_diff, parse_calls, answer_text, call_msg,
-                           tool_msg, first_token_probs, tool_call_prob, pick_template)
+from prompt_format import (HERE, TOOLS, tools_for, CALL_THRESHOLD, render, prompt_diff, parse_calls, answer_text,
+                           call_msg, tool_msg, first_token_probs, tool_call_prob, pick_template)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--url", default="http://localhost:8080")
@@ -197,7 +197,7 @@ if tok_ok:
 # ---------- 4. Как тот же шаблон собирает сам llama.cpp ----------
 case = next((m for m in EVAL if len(m) > 4 and m[2].get("tool_calls") and m[4].get("content")), None)
 if case:
-    r, err = req("/apply-template", {"messages": to_openai(case[:4]), "tools": TOOLS})
+    r, err = req("/apply-template", {"messages": to_openai(case[:4]), "tools": tools_for(case[:4])})
     mine = render(case[:4], add_generation_prompt=True, template=TPL)
     if err:
         print(f"? llama.cpp не собрал промпт сам ({err}); возможно, сервер запущен без --jinja")

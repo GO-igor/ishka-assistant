@@ -4,7 +4,8 @@ python gen_dataset.py  ->  data/train.jsonl, data/eval.jsonl
 Перед обучением ответы стоит перефразировать большой LLM и выборочно проверить руками."""
 import datetime as dt, json, random, pathlib
 import paraphrase
-from backend import Backend, SUBJECTS, BUILDINGS, WD_RU, WEEKDAYS, HOLIDAYS
+from backend import Backend, SUBJECTS, BUILDINGS, WD_RU, WEEKDAYS, HOLIDAYS, EVENT_KINDS
+from store import Store
 
 rnd = random.Random(42)
 TOOLS = {t["function"]["name"] for t in json.load(open(pathlib.Path(__file__).parent / "tools.json", encoding="utf-8"))}
@@ -26,17 +27,23 @@ def pick(xs):
     return rnd.choice(xs)
 
 
+STAROSTA = False  # rand_profile() даёт профиль старосты (примеры, где староста просит что-то для себя)
+
+
 def rand_profile():
     if rnd.random() < 0.12:
-        return {}
-    return {"subgroup": rnd.randint(1, 3), "english_teacher": pick(ENG), "adaptation": rnd.random() < 0.3}
+        return {"role": "starosta"} if STAROSTA else {}
+    p = {"subgroup": rnd.randint(1, 3), "english_teacher": pick(ENG), "adaptation": rnd.random() < 0.3}
+    return p | {"role": "starosta"} if STAROSTA else p
 
 
 def profile_text(p):
-    if not p:
-        return "не заполнен"
-    return (f"подгруппа {p.get('subgroup') or 'не указана'}, английский — {p.get('english_teacher') or 'не указан'}, "
-            f"курсы (А): {'да' if p.get('adaptation') else 'нет'}")
+    if not any(k in p for k in ("subgroup", "english_teacher", "adaptation")):
+        s = "не заполнен"
+    else:
+        s = (f"подгруппа {p.get('subgroup') or 'не указана'}, английский — {p.get('english_teacher') or 'не указан'}, "
+             f"курсы (А): {'да' if p.get('adaptation') else 'нет'}")
+    return s + "; староста группы" if p.get("role") == "starosta" else s
 
 
 def system(now, p):
@@ -557,10 +564,15 @@ def cat_add_homework(split):
             {"role": "assistant", "content": hw_answer(now, res, task)}]
 
 
-def cat_list_homework(split):
+def cat_list_homework(split, posts=False):
     now, p = rand_now(), rand_profile() or {"subgroup": 2, "english_teacher": ENG[2], "adaptation": False}
     b = Backend(now, p)
+    if posts:  # студент в аккаунте, часть Д/З выдал староста
+        b = group_backend(now, p, "starosta" if rnd.random() < 0.15 else "student")
+        p = b.profile
     seed_homework(b, rnd.choice([0, 1, 2, 2, 3]))
+    if posts:
+        seed_posts(b, ("homework",), rnd.choice([1, 1, 2]))
     form = pick(["all", "all", "tomorrow", "today", "subject"])
     if form in ("tomorrow", "today"):
         d = now.date() + dt.timedelta(days=form == "tomorrow")
@@ -606,10 +618,12 @@ def cat_list_homework(split):
                         "По моим записям — ничего. Задали что-то? Скажи, запишу ✍️"])
     elif len(items) == 1:
         h = items[0]
-        ans = pick([f"Есть одно: {short(h['subject'])} — {h['task']}, срок {when_ru(now, h['due'])}.",
-                    f"Записано одно задание: {short(h['subject'])}, {h['task']} — {when_ru(now, h['due'])} 📌"])
+        m = FROM_ST if h.get("from_starosta") else ""
+        ans = pick([f"Есть одно: {short(h['subject'])} — {h['task']}, срок {when_ru(now, h['due'])}{m}.",
+                    f"Записано одно задание: {short(h['subject'])}, {h['task']} — {when_ru(now, h['due'])}{m} 📌"])
     else:
-        lines = "\n".join(f"• {short(h['subject'])}: {h['task']} — {when_ru(now, h['due'])}" for h in items)
+        lines = "\n".join(f"• {short(h['subject'])}: {h['task']} — {when_ru(now, h['due'])}{FROM_ST if h.get('from_starosta') else ''}"
+                          for h in items)
         head = [f"Записано {len(items)} {plural(len(items), 'задание', 'задания', 'заданий')}:\n", "Вот что задано:\n"]
         if day_word:
             head.append(f"На {day_word}:\n")
@@ -707,15 +721,24 @@ def cat_note_add(split):
             {"role": "assistant", "content": ans}]
 
 
-def cat_note_list(split):
+def rem_line(now, r):
+    return f"• {when_ru(now, r['fire_at'])} — {r['text']}" + (FROM_ST if r.get("from_starosta") else "")
+
+
+def cat_note_list(split, posts=False):
     now, p = rand_now(), rand_profile()
     b = Backend(now, p)
+    if posts:  # студент в аккаунте, староста разослал напоминания
+        b = group_backend(now, p, "starosta" if rnd.random() < 0.15 else "student")
+        p = b.profile
     seeded = rnd.sample(NOTES, rnd.choice([0, 1, 2, 3]))
     for x, _ in seeded:
         b.add_note(cap(x))
     for what in rnd.sample(REM_TASKS, rnd.choice([0, 1, 2])):
         at = pick(["", "tomorrow ", pick(WEEKDAYS) + " "]) + f"{rnd.randint(8, 21):02d}:{pick(['00', '15', '30', '45'])}"
         b.create_reminder(cap(what), at=at)
+    if posts:
+        seed_posts(b, ("reminder",), rnd.choice([1, 1, 2]))
     intent = pick(["notes", "notes", "reminders", "both"] + (["search", "search"] if seeded else []))
     if intent == "search":
         pool = seeded if rnd.random() < 0.8 else [n for n in NOTES if n not in seeded]
@@ -733,11 +756,11 @@ def cat_note_list(split):
         args = {}
     res = b.list_notes(**args)
     notes = "📝 Заметки:\n" + "\n".join(f"• {n}" for n in res["notes"])
-    rems = "⏰ Напоминания:\n" + "\n".join(f"• {when_ru(now, r['fire_at'])} — {r['text']}" for r in res["reminders"])
+    rems = "⏰ Напоминания:\n" + "\n".join(rem_line(now, r) for r in res["reminders"])
     if intent == "search" and not res["notes"] and res["reminders"]:
         nr = len(res["reminders"])
         ans = f"Заметок про «{k}» нет, но есть {plural(nr, 'напоминание', 'напоминания', 'напоминаний')}:\n" + \
-            "\n".join(f"• {when_ru(now, r['fire_at'])} — {r['text']}" for r in res["reminders"])
+            "\n".join(rem_line(now, r) for r in res["reminders"])
     elif intent == "search":
         parts = ([notes] if res["notes"] else []) + ([rems] if res["reminders"] else [])
         ans = "\n\n".join(parts) if parts else pick([f"Про «{k}» ничего не нашёл 🤷", f"Заметок про «{k}» нет 🙃"])
@@ -745,7 +768,7 @@ def cat_note_list(split):
         if res["notes"]:
             ans = notes
         elif res["reminders"]:
-            ans = "Заметок пока нет. Зато есть напоминания:\n" + "\n".join(f"• {when_ru(now, r['fire_at'])} — {r['text']}" for r in res["reminders"])
+            ans = "Заметок пока нет. Зато есть напоминания:\n" + "\n".join(rem_line(now, r) for r in res["reminders"])
         else:
             ans = pick(["Заметок пока нет 📭 Скажи «запиши в заметки …» — сохраню.", "Пока пусто — ни одной заметки."])
     elif intent == "reminders":
@@ -1055,7 +1078,9 @@ def brief_answer(res, now, auto):
         out.append("⏳ " + "; ".join(f"{x['title']} ({short(x['subject'])}) — {in_days(x['days_left'])}" for x in res["deadlines"]))
     if res["exams"]:
         out.append("🎓 " + cap("; ".join(f"{e['kind']} по {dat(short(e['subject']))} {in_days(e['days_left'])}" for e in res["exams"])))
-    if not (res["lessons"] or res["homework"] or res["deadlines"] or res["exams"]):
+    if res.get("from_starosta"):  # отдельной строкой: всё, что разослал староста
+        out.append("📢 От старосты: " + "; ".join(starosta_item(now, x) for x in res["from_starosta"]))
+    if not (res["lessons"] or res["homework"] or res["deadlines"] or res["exams"] or res.get("from_starosta")):
         out.append(pick(["Отдыхай 😌", "Можно выдохнуть 🙂"] + (["Хорошего выходного!"] if d.weekday() >= 5 else [])))
     else:
         late = not auto and now.hour >= 19
@@ -1063,7 +1088,8 @@ def brief_answer(res, now, auto):
     return "\n\n".join(out)
 
 
-def cat_brief(split):
+def cat_brief(split, posts=False):
+    """posts=True — студент вошёл в аккаунт, и староста что-то разослал группе."""
     auto = rnd.random() < 0.65
     day = "today"
     if auto:
@@ -1079,6 +1105,9 @@ def cat_brief(split):
         b = Backend(now, p)
         if not has_overlap(b, d):
             break
+    if posts:
+        b = group_backend(now, p, "starosta" if rnd.random() < 0.15 else "student")
+        p = b.profile
     for l in rnd.sample(b.lessons_on(d), min(len(b.lessons_on(d)), rnd.choice([0, 0, 1, 2]))):
         if l["subject"] in HW_TASKS and dt.datetime.combine(d, dt.time.fromisoformat(l["start"])) > now:  # Д/З к парам этого дня
             b.homework.append({"subject": SUBJECTS[l["subject"]]["name"], "task": pick(HW_TASKS[l["subject"]]),
@@ -1091,6 +1120,8 @@ def cat_brief(split):
         for code, kind in rnd.sample([x for x in EXAM_POOL if x[1] != "экзамен"], rnd.choice([1, 2])):
             ed = pick(no_sunday([now.date() + dt.timedelta(days=k) for k in range(1, 15)]))
             b.add_exam(SUBJECTS[code]["name"], ed.isoformat(), kind=kind)
+    if posts:
+        seed_posts(b)
     if auto:
         q = "[авто] утренний брифинг"
     else:
@@ -1210,6 +1241,458 @@ def cat_explain_extra(split):
     return [system(now, p), {"role": "user", "content": pick(qs)}, {"role": "assistant", "content": it["answer"]}]
 
 
+# ---------------- староста: рассылки группе; мероприятия и хакатоны ----------------
+# Свой генератор случайных чисел (см. __main__), чтобы не сдвинуть ключи перефразов у старых категорий.
+FROM_ST = " (от старосты)"
+GROUPS = ["8К51", "8К52", "8К53", "8В51", "8И51", "8Д51"]  # модель их не видит
+SUB_ORD = {1: "первой", 2: "второй", 3: "третьей"}  # «второй подгруппе»
+SUB_GEN = {1: "первой", 2: "второй", 3: "третьей"}  # «для второй подгруппы»
+GROUP_REM = ["собрание группы в 19 корпусе", "сдать деньги на подарок куратору", "принести зачётки в деканат",
+             "заполнить анкету от деканата", "забрать студенческие в 10 корпусе", "записаться на секции по физре",
+             "сдать справку 086/у в медпункт", "пройти опрос о качестве обучения", "сдать заявления на общежитие",
+             "прийти на фотосессию для студенческих", "проголосовать за профорга группы", "сдать конспекты на проверку",
+             "принести паспорт для пропуска", "заполнить согласие на обработку данных", "забрать методички в НТБ"]
+GROUP_EVENTS = ["Встреча группы с куратором", "Экскурсия в IT-парк", "Субботник у 19 корпуса", "Поход группы в кино",
+                "Посвящение в студенты ИШИТР", "Собрание потока в ГК", "Квиз между группами", "Тренировка к турниру по волейболу"]
+EV_NAMES = {
+    "хакатон": ["Хакатон «Код Сибири»", "AI-хакатон ИШИТР", "Хакатон «Умный кампус»", "Хакатон по анализу данных",
+                "Хакатон «Цифровой Томск»", "Хакатон для первокурсников", "Хакатон по кибербезопасности", "Хакатон «GameDev за выходные»"],
+    "конференция": ["Студенческая IT-конференция ИШИТР", "Научная сессия первокурсников", "Конференция по робототехнике",
+                    "Конференция «ИТ в образовании»", "Конференция молодых программистов"],
+    "олимпиада": ["Олимпиада по программированию", "Олимпиада по математике ТПУ", "Олимпиада по информатике для первокурсников",
+                  "Командная олимпиада по программированию", "Олимпиада по английскому языку"],
+    "конкурс": ["Конкурс студенческих стартапов", "Конкурс IT-проектов «Старт»", "Конкурс научных работ первокурсников",
+                "Конкурс мобильных приложений", "Конкурс чат-ботов"],
+    "мастер-класс": ["Мастер-класс по Git", "Мастер-класс «Python для анализа данных»", "Мастер-класс по Linux",
+                     "Мастер-класс «Как пройти собеседование в IT»", "Мастер-класс по Docker", "Мастер-класс по 3D-печати"],
+    "другое": ["День карьеры в IT", "Открытая лекция про нейросети", "Турнир по киберспорту", "Ярмарка вакансий",
+               "Экскурсия в IT-компанию", "Лекция разработчика из индустрии", "Встреча с выпускниками ИШИТР"],
+}
+EV_PLACES = ["МКЦ", "ГК, актовый зал", "КЦ, ауд. 105", "19 корпус, ауд. 210", "10 корпус", "НТБ, коворкинг", "онлайн",
+             "ГК, ауд. 230", "8 корпус", "МКЦ, большой зал"]
+EV_DESC = ["команды по 3–5 человек", "регистрация до среды", "нужен ноутбук", "вход свободный", "призы для победителей",
+           "можно участвовать онлайн", "заявки до пятницы"]
+KIND_PL = {"хакатон": "хакатоны", "конференция": "конференции", "олимпиада": "олимпиады", "конкурс": "конкурсы",
+           "мастер-класс": "мастер-классы"}
+KIND_GEN = {"хакатон": "хакатонов", "конференция": "конференций", "олимпиада": "олимпиад", "конкурс": "конкурсов",
+            "мастер-класс": "мастер-классов"}
+KIND_ACC = {"хакатон": "хакатон", "конференция": "конференцию", "олимпиада": "олимпиаду", "конкурс": "конкурс",
+            "мастер-класс": "мастер-класс"}
+KIND_NEXT = {"хакатон": "ближайший хакатон", "конференция": "ближайшая конференция", "олимпиада": "ближайшая олимпиада",
+             "конкурс": "ближайший конкурс", "мастер-класс": "ближайший мастер-класс"}
+
+
+def phr(lst, split, sub):
+    """Формулировка; если рассылка подгруппе — только те, где подгруппа названа ({to} или {tg})."""
+    xs = split_phr(lst, split)
+    return pick([x for x in xs if "{to}" in x or "{tg}" in x] if sub else xs)
+
+
+def people(n):
+    return f"{n} {plural(n, 'человек', 'человека', 'человек')}"
+
+
+def group_backend(now, p, role="student"):
+    """Студент вошёл в аккаунт: база в памяти, группа из 16–27 человек со старостой (b.head — его id)."""
+    st = Store(":memory:")
+    grp = pick(GROUPS)
+    me = st.add_account("me", None, grp, role=role, subgroup=p.get("subgroup"))
+    head = me if role == "starosta" else st.add_account("head", None, grp, role="starosta", subgroup=rnd.randint(1, 3))
+    for i in range(rnd.randint(15, 26)):
+        st.add_account(f"s{i}", None, grp, subgroup=pick([1, 2, 3, 1, 2, 3, None]))
+    b = Backend(now, {k: v for k, v in p.items() if k != "role"} | {"group": grp, "role": role}, st, me)
+    b.head = head
+    return b
+
+
+def head_backend(b):
+    """Backend старосты той же группы: от его имени рассылки, которые видит студент b."""
+    acc = b.store.account(account_id=b.head)
+    return Backend(b.now, b.store.profile(acc), b.store, b.head)
+
+
+def rand_event(now, kind=None, days=(0, 45)):
+    kind = kind or pick(list(EV_NAMES))
+    e = {"title": pick(EV_NAMES[kind]), "kind": kind,
+         "date": (now.date() + dt.timedelta(days=rnd.randint(*days))).isoformat()}
+    t = pick([None, "10:00", "11:00", "12:00", "14:00", "15:30", "16:30", "17:00", "18:00", "18:30", "19:00"])
+    if t:
+        e["time"] = t
+    e["place"] = pick(EV_PLACES)
+    if rnd.random() < 0.3:
+        e["description"] = pick(EV_DESC)
+    return e
+
+
+def seed_posts(b, kinds=("homework", "event", "reminder"), k=None):
+    """Староста разослал группе студента b что-то из kinds; иногда — другой подгруппе (студент этого не увидит)."""
+    hb = head_backend(b)
+    now = b.now
+    for _ in range(k or rnd.choice([1, 1, 2, 2, 3])):
+        kind = pick(kinds)
+        sub = rnd.randint(1, 3) if rnd.random() < 0.2 else None
+        if kind == "homework":
+            code = pick(student_subjects(b) or ["math"])
+            due = "next_class" if rnd.random() < 0.6 else pick(no_sunday([now.date() + dt.timedelta(days=x) for x in range(1, 7)])).isoformat()
+            hb.group_add_homework(SUBJECTS[code]["name"], pick(HW_TASKS[code]), due=due, subgroup=sub)
+        elif kind == "event":
+            e = rand_event(now, days=(0, 13)) if rnd.random() < 0.6 else {
+                "title": pick(GROUP_EVENTS), "date": (now.date() + dt.timedelta(days=rnd.randint(0, 13))).isoformat(),
+                "time": pick(["12:00", "14:15", "16:30", "18:00", "19:00"]), "place": pick(EV_PLACES)}
+            hb.group_add_event(e["title"], e["date"], e.get("time"), e.get("place"), subgroup=sub)
+        else:
+            at = (now + dt.timedelta(days=rnd.randint(0, 6))).date().isoformat() + f" {rnd.randint(8, 21):02d}:{pick(['00', '30'])}"
+            hb.group_create_reminder(cap(pick(GROUP_REM)), at=at, subgroup=sub)
+
+
+def ev_when(now, e):
+    return when_ru(now, e["date"] + (" " + e["time"] if e.get("time") else ""))
+
+
+def starosta_item(now, x):
+    """Одна новость от старосты для брифинга."""
+    if x["kind"] == "homework":
+        return f"Д/З по {dat(short(x['subject']))} — {x['task']} ({when_ru(now, x['due'])})"
+    if x["kind"] == "event":
+        return f"{x['title']} — {ev_when(now, x)}" + (f", {x['place']}" if x.get("place") else "")
+    return f"{low(x['text'])} — {when_ru(now, x['fire_at'])}"
+
+
+def cat_brief_posts(split):
+    return cat_brief(split, posts=True)
+
+
+def cat_list_homework_posts(split):
+    return cat_list_homework(split, posts=True)
+
+
+def cat_note_list_posts(split):
+    return cat_note_list(split, posts=True)
+
+
+def event_line(now, e):
+    s = f"• {ev_when(now, e)} — {e['title']}" + (f", {e['place']}" if e.get("place") else "")
+    if e.get("description"):
+        s += f" ({e['description']})"
+    return s + (FROM_ST if e.get("from_starosta") else "")
+
+
+def cat_events(split):
+    now = rand_now()
+    b = group_backend(now, rand_profile(), "starosta" if rnd.random() < 0.15 else "student")
+    form = pick(["any", "any", "kind", "kind", "kind", "week", "kind_week", "month", "next", "all"])
+    kind = pick(EVENT_KINDS)
+    b.events = [rand_event(now) for _ in range(pick([0, 1, 2, 3, 3, 4, 5, 6, 8, 12]))]
+    if form in ("kind", "kind_week", "next") and rnd.random() < 0.75:  # обычно спрашивают о том, что есть
+        b.events.append(rand_event(now, kind, (1, 6) if form == "kind_week" else (0, 40)))
+    if rnd.random() < 0.3:
+        seed_posts(b, ("event",), 1)
+    if form == "any":
+        q = pick(split_phr(["какие мероприятия скоро?", "что интересного будет в универе?", "куда сходить из мероприятий?",
+                            "есть какие-нибудь движухи в ТПУ?", "покажи ближайшие мероприятия", "что по мероприятиям?",
+                            "чем заняться кроме учёбы?", "какие ивенты скоро?"], split))
+        args = {}
+    elif form == "kind":
+        q = pick(split_phr(["какие {pl} скоро?", "есть {pl}?", "будут какие-нибудь {pl}?", "покажи {pl}",
+                            "хочу на {acc}, что есть?", "{pl} какие ближайшие", "а {pl} будут?", "подскажи {pl} в ТПУ"],
+                           split)).format(pl=KIND_PL[kind], acc=KIND_ACC[kind])
+        args = {"kind": kind}
+    elif form == "week":
+        q = pick(split_phr(["что на этой неделе из мероприятий?", "мероприятия на неделю", "есть что-то интересное на этой неделе?",
+                            "куда сходить на неделе?", "события этой недели покажи", "что за ивенты на неделе?"], split))
+        args = {"period": "week"}
+    elif form == "kind_week":
+        q = pick(split_phr(["{pl} на этой неделе есть?", "на неделе будут {pl}?", "какие {pl} на этой неделе?",
+                            "есть {pl} в ближайшие дни?", "{pl} на неделе покажи", "на этой неделе {pl} какие-нибудь есть?"],
+                           split)).format(pl=KIND_PL[kind])
+        args = {"kind": kind, "period": "week"}
+    elif form == "month":
+        q = pick(split_phr(["какие мероприятия в этом месяце?", "что интересного в ближайший месяц?", "мероприятия на месяц вперёд",
+                            "что будет в этом месяце из событий?", "события на месяц покажи", "ивенты на ближайший месяц"], split))
+        args = {"period": "month"}
+    elif form == "next":
+        q = pick(split_phr(["когда {nx}?", "{nx} когда будет?", "а когда {nx}?", "подскажи, когда {nx}",
+                            "скажи дату: {nx}", "{nx} — когда?"], split)).format(nx=KIND_NEXT[kind])
+        args = {"kind": kind, "period": "all"}
+    else:
+        q = pick(split_phr(["покажи все мероприятия", "все предстоящие мероприятия", "какие вообще мероприятия запланированы?",
+                            "весь список мероприятий", "что запланировано из мероприятий до конца семестра?", "все ивенты покажи"], split))
+        args = {"period": "all"}
+    res = b.get_events(**args)
+    items = res["items"]
+    span = {"week": "на этой неделе", "month": "в ближайший месяц", "all": "пока"}.get(args.get("period"), "в ближайший месяц")
+    if not items:
+        what = KIND_GEN[kind] if "kind" in args else "мероприятий"
+        ans = pick([f"{cap(span)} {what} не нашёл 🤷 Как появятся — покажу.",
+                    f"{cap(span)} {what} в списке нет 🙃 Загляни попозже, список пополняется."])
+        if span == "пока":
+            ans = pick([f"Пока {what} не запланировано 🤷 Как появятся — покажу.", f"В списке пока нет {what} 🙃"])
+    elif form == "next":
+        e = items[0]
+        ans = (f"{cap(KIND_NEXT[kind])} — {e['title']}, {ev_when(now, e)}" + (f", {e['place']}" if e.get("place") else "")
+               + (f" ({e['description']})" if e.get("description") else "") + (FROM_ST if e.get("from_starosta") else "") + ". "
+               + ("Это уже сегодня! 🔥" if e["days_left"] == 0 else f"Осталось {days_n(e['days_left'])} 🗓️"))
+    else:
+        head = (f"{cap(KIND_PL[kind])} {span}:" if "kind" in args else
+                pick([f"Мероприятия {span}:", "Вот что нашёл 🗓️", "Ближайшие мероприятия:"]))
+        ans = head + "\n" + "\n".join(event_line(now, e) for e in items)
+        if res.get("more"):
+            ans += f"\n\nИ ещё {res['more']} — спроси про конкретный вид (хакатоны, олимпиады…), покажу."
+        elif rnd.random() < 0.3:
+            ans += "\n\n" + pick(["Хочешь, поставлю напоминание о каком-нибудь?", "Если надумаешь пойти — могу напомнить заранее 🔔"])
+    return [system(now, b.profile), {"role": "user", "content": q}, tc("get_events", args), tr("get_events", res),
+            {"role": "assistant", "content": ans}]
+
+
+def group_hw_phrase(split, form, sub):
+    """Фраза старосты «выдай группе Д/З»: {s} предмет, {sd} в дательном, {t} задание, {dd}/{da}/{di}/{d} срок."""
+    if sub:
+        return pick(split_phr(["{o} подгруппе дз по {sd}: {t}", "отправь {o} подгруппе: по {sd} {t}",
+                               "разошли дз по {sd} только {o} подгруппе — {t}", "для {og} подгруппы по {sd} задали {t}, разошли",
+                               "кинь {o} подгруппе домашку по {sd}: {t}", "выдай {o} подгруппе задание по {sd}: {t}"], split))
+    return pick(split_phr({
+        "next": ["выдай группе дз по {sd}: {t}", "отправь всем дз по {sd} — {t}", "разошли группе домашку по {sd}: {t}",
+                 "группе задали по {sd} {t} к следующей паре, разошли", "объяви всем: по {sd} на след пару {t}",
+                 "кинь всем дз: {s}, {t}", "закинь группе дз по {sd}: {t}", "раздай группе задание по {sd}: {t}"],
+        "weekday": ["выдай группе дз по {sd} к {dd}: {t}", "всем по {sd} к {dd} надо {t}, разошли", "отправь группе: по {sd} {t}, сдать {di}",
+                    "разошли дз по {sd} на {da} — {t}", "объяви группе дз по {sd}: {t}, к {dd}",
+                    "группе по {sd} задали {t} к {dd}, отправь всем", "кинь всем: {s} — {t}, сдать к {dd}", "закинь группе дз на {da} по {sd}: {t}"],
+        "tomorrow": ["выдай группе дз на завтра по {sd}: {t}", "всем на завтра по {sd} {t}, разошли", "отправь группе: к завтра по {sd} {t}",
+                     "разошли всем на завтра: {s}, {t}", "объяви: на завтра по {sd} {t}", "закинь группе на завтра — {s}: {t}",
+                     "кинь всем дз на завтра по {sd}: {t}", "группе на завтра по {sd} задали {t}, отправь"],
+        "date": ["выдай группе дз по {sd} к {d}: {t}", "разошли всем: по {sd} {t}, срок {d}", "отправь группе дз по {sd} на {d} — {t}",
+                 "объяви всем: {s}, {t}, сдать до {d}", "кинь группе: к {d} по {sd} {t}", "закинь всем дз по {sd}: {t}, к {d}",
+                 "раздай группе: {s} — {t}, срок {d}", "группе к {d} по {sd} надо {t}, разошли"]}[form], split))
+
+
+def group_to(res):
+    return f"{SUB_ORD[res['subgroup']]} подгруппе" if res.get("subgroup") else "группе"
+
+
+def group_hw_answer(now, res, task):
+    sh = cap(short(res["subject"]))
+    w, pair = when_ru(now, res["due"]), " на паре" if " " in res["due"] else ""
+    to, n = group_to(res), res["recipients"]
+    note = ""
+    if res.get("no_class_that_day"):
+        note = " " + pick([f"Пары по {dat(short(res['subject']))} в этот день нет, так что срок просто по дате.",
+                           "В этот день пары нет — срок по дате."])
+    return pick([f"Отправил {to} 📢 {sh}: {task}, срок — {w}{pair}.{note} Получат {people(n)}, у всех появится в Д/З и в брифинге.",
+                 f"Готово ✅ Разослал {to}: {sh} — {task}, сдать {w}{pair}.{note} Это увидят {people(n)}.",
+                 f"Есть! {sh}: {task} ({w}{pair}) — ушло {to}, {people(n)} 📢{note}",
+                 f"Разослал 📢 {sh}: {task}, срок {w}{pair}.{note} Задание у {people(n)} в Д/З и в утреннем брифинге."])
+
+
+def group_event_answer(now, res):
+    to, n = group_to(res), res["recipients"]
+    w = ev_when(now, res) + (f", {res['place']}" if res.get("place") else "")
+    return pick([f"Разослал {to} 📢 {res['title']} — {w}. Получат {people(n)}, появится у всех в брифинге и в мероприятиях.",
+                 f"Готово ✅ {res['title']}, {w} — отправил {to} ({people(n)}).",
+                 f"Есть! Мероприятие «{res['title']}» ({w}) ушло {to}: {people(n)} увидят его в брифинге 📢"])
+
+
+def group_rem_answer(now, res, what):
+    to, n = group_to(res), res["recipients"]
+    w = when_ru(now, res["fire_at"])
+    return pick([f"Готово 🔔 {cap(w)} {to} придёт напоминание: «{cap(what)}». Получат {people(n)}.",
+                 f"Разослал напоминание {to} на {w.replace('сегодня в ', '').removeprefix('в ')}: {what} 🔔 Это {people(n)}.",
+                 f"Ок, {w} напомню {to} — {what} ({people(n)}) 📢"])
+
+
+def event_phrase(now, title, d, time, place):
+    """Как староста называет мероприятие и дату: -> (текст, аргументы date/time/place)."""
+    delta = (d - now.date()).days
+    if delta == 1 and rnd.random() < 0.5:
+        spoken, date = "завтра", "tomorrow"
+    elif 1 < delta < 7 and rnd.random() < 0.4:
+        spoken, date = WEEKDAYS_FUT[d.weekday()], WEEKDAYS[d.weekday()]
+    else:
+        spoken, date = date_ru(d), d.isoformat()
+    args = {"title": title, "date": date} | ({"time": time} if time else {}) | ({"place": place} if place else {})
+    return spoken + (f" в {hm(time)}" if time else "") + (f", {place}" if place else ""), args
+
+
+def cat_group_post(split):
+    now = rand_now((7, 22))
+    b = group_backend(now, rand_profile(), "starosta")
+    kind = pick(["homework"] * 9 + ["event"] * 6 + ["reminder"] * 5)
+    sub = rnd.randint(1, 3) if rnd.random() < 0.18 else None
+    msgs = [system(now, b.profile)]
+    if kind == "homework":
+        target = Backend(now, dict(b.profile, subgroup=sub)) if sub else b
+        subs = student_subjects(target)
+        if rnd.random() < 0.06 or not subs:  # предмета нет в расписании: пары не найдётся, спросим дату
+            alias, task = pick(UNKNOWN_HW)
+            q = group_hw_phrase(split, "next", sub).format(s=alias, sd=sdat(alias), t=task, o=SUB_ORD.get(sub), og=SUB_GEN.get(sub))
+            args = {"subject": alias, "task": task, "due": "next_class"} | ({"subgroup": sub} if sub else {})
+            res = b.group_add_homework(**args)
+            msgs += [{"role": "user", "content": q}, tc("group_add_homework", args), tr("group_add_homework", res),
+                     {"role": "assistant", "content": pick([
+                         f"Не нашёл пар по предмету «{alias}» в расписании группы 🤔 К какому числу сдавать? Разошлю с этой датой.",
+                         f"Хм, пар по предмету «{alias}» в расписании нет 🤔 Скажи дату сдачи — разошлю на неё."])}]
+            if rnd.random() < 0.6:
+                d = pick(no_sunday([now.date() + dt.timedelta(days=k) for k in range(2, 8)]))
+                msgs.append({"role": "user", "content": pick([date_ru(d), f"к {date_ru(d)}", f"до {date_ru(d)}"])})
+                args = args | {"due": d.isoformat()}
+                res = b.group_add_homework(**args)
+                msgs += [tc("group_add_homework", args), tr("group_add_homework", res),
+                         {"role": "assistant", "content": group_hw_answer(now, res, task)}]
+            return msgs
+        code = pick(subs)
+        task, alias = pick(HW_TASKS[code]), sub_alias(code)
+        today = now.date()
+        form = "next" if sub else pick(["next", "next", "next", "weekday", "weekday", "tomorrow", "date", "date"])
+        if form == "tomorrow" and not no_sunday([today + dt.timedelta(days=1)]):
+            form = "next"
+        fmt = dict(s=alias, sd=sdat(alias), t=task, o=SUB_ORD.get(sub), og=SUB_GEN.get(sub))
+        if form == "next":
+            due = "next_class"
+        elif form == "weekday":
+            d = pick_day(target, code, no_sunday([today + dt.timedelta(days=k) for k in range(1, 8)]))
+            fmt |= dict(dd=WD_DAT[d.weekday()], da=WD_ACC[d.weekday()], di=WEEKDAYS_FUT[d.weekday()])
+            due = WEEKDAYS[d.weekday()]
+        elif form == "tomorrow":
+            due = "tomorrow"
+        else:
+            d = pick_day(target, code, no_sunday([today + dt.timedelta(days=k) for k in range(2, 10)]))
+            fmt["d"] = date_ru(d)
+            due = d.isoformat()
+        q = group_hw_phrase(split, form, sub).format(**fmt)
+        args = {"subject": alias, "task": task, "due": due} | ({"subgroup": sub} if sub else {})
+        res = b.group_add_homework(**args)
+        if "error" in res:
+            return None
+        return msgs + [{"role": "user", "content": q}, tc("group_add_homework", args), tr("group_add_homework", res),
+                       {"role": "assistant", "content": group_hw_answer(now, res, task)}]
+    if kind == "event":
+        e = rand_event(now, days=(1, 30)) if rnd.random() < 0.6 else {
+            "title": pick(GROUP_EVENTS), "date": (now.date() + dt.timedelta(days=rnd.randint(1, 20))).isoformat(),
+            "time": pick([None, "12:00", "14:15", "16:30", "18:00", "19:00"]), "place": pick([None] + EV_PLACES)}
+        d = dt.date.fromisoformat(e["date"])
+        spoken, args = event_phrase(now, e["title"], d, e.get("time"), e.get("place"))
+        said = low(e["title"]) if rnd.random() < 0.5 else e["title"]  # как написал староста; в title — с заглавной
+        if sub:
+            args["subgroup"] = sub
+        to = f"{SUB_ORD[sub]} подгруппе" if sub else pick(["группе", "всем"])
+        if rnd.random() < 0.2:  # без даты: уточняем
+            q = phr(["объяви {to} про {t}", "разошли {to}: {t}", "кинь {to} инфу про мероприятие «{t}»",
+                     "напиши {to} про {t}", "закинь {to} мероприятие: {t}", "отправь {to}: будет {t}"],
+                    split, sub).format(to=to, t=said)
+            msgs += [{"role": "user", "content": q}, {"role": "assistant", "content": pick([
+                "Когда будет мероприятие? Скажи дату (и время с местом, если знаешь) — разошлю.",
+                "Ок! А когда и где? Дату обязательно, время и место — по желанию 🙂"])},
+                {"role": "user", "content": spoken}]
+        else:
+            q = phr(["закинь {to}: {t}, {w}", "объяви {to} — {t}, {w}", "разошли {to} мероприятие: {t}, {w}",
+                     "отправь {to}: {w} будет {tl}", "напиши {to}, что {w} {tl}", "кинь {to} инфу: {t}, {w}",
+                     "добавь {to} мероприятие {t} — {w}", "разошли: {t}, {w}, пусть все знают"],
+                    split, sub).format(to=to, t=said, tl=low(e["title"]), w=spoken)
+            msgs.append({"role": "user", "content": q})
+        res = b.group_add_event(**args)
+        return msgs + [tc("group_add_event", args), tr("group_add_event", res),
+                       {"role": "assistant", "content": group_event_answer(now, res)}]
+    what = pick(GROUP_REM)
+    wp, targs = reminder_phrase(now)
+    to = f"{SUB_ORD[sub]} подгруппе" if sub else "группе"
+    args = {"text": cap(what)} | targs | ({"subgroup": sub} if sub else {})
+    if rnd.random() < 0.2:  # без времени: уточняем
+        q = phr(["напомни {to} {x}", "разошли напоминание {to}: {x}", "сделай {to} напоминалку — {x}",
+                 "пусть всем придёт напоминание: {x}", "надо напомнить {to} {x}", "напоминалку {to}: {x}"],
+                split, sub).format(to=to, x=what)
+        msgs += [{"role": "user", "content": q}, {"role": "assistant", "content": pick([
+            f"Когда напомнить {to}? Например «завтра в 9:00» или «в пятницу в 18:00».",
+            "Ок! А когда разослать напоминание? Скажи время или «через сколько» 🙂"])}, {"role": "user", "content": wp}]
+    else:
+        q = phr(["напомни {to} {w}: {x}", "разошли напоминание {to} {w}: {x}", "поставь всем напоминалку {w} — {x}",
+                 "сделай напоминание для {tg} {w}: {x}", "пусть всем {w} придёт напоминание: {x}", "напомни всем {w}: {x}",
+                 "кинь {to} напоминалку {w}: {x}", "{w} напомни {to} {x}"],
+                split, sub).format(to=to, tg=f"{SUB_GEN[sub]} подгруппы" if sub else "группы", w=wp, x=what)
+        msgs.append({"role": "user", "content": q})
+    res = b.group_create_reminder(**args)
+    return msgs + [tc("group_create_reminder", args), tr("group_create_reminder", res),
+                   {"role": "assistant", "content": group_rem_answer(now, res, what)}]
+
+
+def cat_group_denied(split):
+    """Обычный студент просит разослать группе: это может только староста, предлагаем записать себе."""
+    now = rand_now()
+    b = group_backend(now, rand_profile(), "student")
+    msgs = [system(now, b.profile)]
+    kind = pick(["homework", "homework", "event", "reminder"])
+    if kind == "homework":
+        code = pick(student_subjects(b) or ["math"])
+        task, alias = pick(HW_TASKS[code]), sub_alias(code)
+        q = group_hw_phrase(split, "next", None).format(s=alias, sd=sdat(alias), t=task)
+        name, args = "group_add_homework", {"subject": alias, "task": task, "due": "next_class"}
+        own, own_args = "add_homework", {"subject": alias, "task": task, "due": "next_class"}
+        offer = "Могу записать это Д/З тебе — записать?"
+    elif kind == "event":
+        e = rand_event(now, days=(1, 20))
+        spoken, args = event_phrase(now, e["title"], dt.date.fromisoformat(e["date"]), e.get("time"), e.get("place"))
+        q = pick(split_phr(["разошли группе: {t}, {w}", "объяви всем — {t}, {w}", "закинь всем мероприятие: {t}, {w}",
+                            "отправь группе: {t}, {w}", "кинь всем инфу: {t}, {w}", "напиши всей группе: {t}, {w}"],
+                           split)).format(t=e["title"], w=spoken)
+        name = "group_add_event"
+        own, own_args = "add_note", {"text": f"{e['title']} — {spoken}"}
+        offer = "Могу сохранить это мероприятие тебе в заметки — сохранить?"
+    else:
+        what = pick(GROUP_REM)
+        wp, targs = reminder_phrase(now)
+        q = pick(split_phr(["напомни всей группе {w} {x}", "разошли напоминание группе {w}: {x}", "пусть всем {w} придёт напоминание: {x}",
+                            "поставь всем напоминалку {w} — {x}", "напомни всем {w}: {x}", "сделай напоминание для группы {w}: {x}"],
+                           split)).format(w=wp, x=what)
+        name, args = "group_create_reminder", {"text": cap(what)} | targs
+        own, own_args = "create_reminder", {"text": cap(what)} | targs
+        offer = "Могу поставить это напоминание тебе — поставить?"
+    assert getattr(b, name)(**args) == {"error": "not_starosta"}  # бэкенд не даст, даже если модель попробует
+    # инструментов рассылки в промпте студента нет (prompt_format.tools_for): отвечаем сразу текстом
+    msgs += [{"role": "user", "content": q}, {"role": "assistant", "content": pick([
+        f"Рассылать группе может только староста 🙂 {offer}",
+        f"Отправлять всей группе умеет только аккаунт старосты. {offer}",
+        f"Эта функция есть только у старосты 🙃 Попроси старосту разослать. {offer}"])}]
+    if rnd.random() < 0.5:
+        r2 = getattr(b, own)(**own_args)
+        if own == "add_homework" and "error" in r2:
+            return msgs
+        msgs += [{"role": "user", "content": pick(["да", "давай", "ага, запиши", "да, пожалуйста"])}, tc(own, own_args), tr(own, r2)]
+        if own == "add_homework":
+            msgs.append({"role": "assistant", "content": hw_answer(now, r2, own_args["task"])})
+        elif own == "add_note":
+            msgs.append({"role": "assistant", "content": pick(["Сохранил в заметки 📝", "Записал в заметки ✍️ Найдёшь по слову из названия."])})
+        else:
+            msgs.append({"role": "assistant", "content": reminder_answer(now, r2, low(own_args["text"]))})
+    return msgs
+
+
+def cat_starosta_personal(split):
+    """Староста просит что-то для себя: обычные инструменты, без рассылки."""
+    global STAROSTA
+    STAROSTA = True
+    try:
+        return pick([cat_add_homework, cat_add_homework, cat_reminder, cat_reminder, cat_list_homework, cat_schedule,
+                     cat_note_add, cat_add_deadline, cat_brief])(split)
+    finally:
+        STAROSTA = False
+
+
+def cat_starosta_chat(split):
+    """Староста спрашивает, что умеет."""
+    now = rand_now()
+    b = group_backend(now, rand_profile(), "starosta")
+    q = pick(split_phr(["что я могу как староста?", "как разослать группе дз?", "как отправить всем напоминание?",
+                        "а что умеет староста?", "я староста, что ты можешь для группы?", "как сделать рассылку группе?"], split))
+    ans = pick(["Ты староста, так что можешь рассылать группе (или одной подгруппе):\n• Д/З — появится у всех в Д/З и в брифинге\n"
+                "• мероприятия — увидят в брифинге и в списке мероприятий\n• напоминания — придут всем в нужное время\n\n"
+                "Просто напиши, например: «выдай группе дз по матлогике: №5–10 к пятнице» или «напомни всем завтра в 18:00 про собрание» 📢",
+                "Как староста ты можешь отправить всей группе Д/З, мероприятие или напоминание — оно придёт каждому в брифинг 📢 "
+                "Скажи, например: «разошли группе: хакатон 24 октября в 10:00, МКЦ». Если нужно только одной подгруппе — так и скажи."])
+    return [system(now, b.profile), {"role": "user", "content": q}, {"role": "assistant", "content": ans}]
+
+
+STAROSTA_CATS = [(cat_events, 55), (cat_group_post, 75), (cat_group_denied, 15), (cat_starosta_personal, 25),
+                 (cat_brief_posts, 40), (cat_list_homework_posts, 20), (cat_note_list_posts, 12), (cat_starosta_chat, 6)]
+
+
 # Только train: после первого обучения модель вызывала инструмент даже на «привет» (ответов текстом было 6%)
 TEXT_CATS = [(cat_chat_extra, 55), (cat_explain_extra, 45)]
 
@@ -1259,6 +1742,14 @@ if __name__ == "__main__":
             data[split] += build(260, split, TEXT_CATS)
             rnd.shuffle(data[split])
             rnd = main_rnd  # eval собирается дальше тем же генератором, что и раньше
+        # 4) Староста (рассылки группе) и мероприятия — тоже свой генератор; eval — по 5 на категорию
+        main_rnd, rnd = rnd, random.Random(4040 if split == "train" else 4041)
+        rows = build(240, split, STAROSTA_CATS) if split == "train" else [r for c in STAROSTA_CATS for r in build(5, split, [c])]
+        if split == "train":
+            print("перефразировано (староста, мероприятия):", sum(paraphrase.apply(m, overlay) for m in rows))
+        data[split] += rows
+        rnd.shuffle(data[split])
+        rnd = main_rnd
         with open(root / f"{split}.jsonl", "w", encoding="utf-8") as f:
             for m in data[split]:
                 f.write(json.dumps({"messages": m}, ensure_ascii=False) + "\n")

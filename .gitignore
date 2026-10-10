@@ -4,3 +4,6 @@ __pycache__/
 *.zip
 .ipynb_checkpoints/
 diag_gguf_template.jinja
+db/*.sqlite
+db/*.sqlite-journal
+passwords.csv

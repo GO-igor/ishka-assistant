@@ -2,6 +2,8 @@
 import json, sys, collections
 
 tools = {t["function"]["name"]: t["function"]["parameters"] for t in json.load(open("tools.json", encoding="utf-8"))}
+# group_* (рассылки группе) есть в промпте только у старосты: prompt_format.tools_for
+STAROSTA_MARK = "; староста группы."
 errors, stats = 0, collections.Counter()
 
 for ln, line in enumerate(open(sys.argv[1], encoding="utf-8"), 1):
@@ -13,13 +15,14 @@ for ln, line in enumerate(open(sys.argv[1], encoding="utf-8"), 1):
         err(f"невалидный JSON: {e}"); continue
     if msgs[0]["role"] != "system": err("первое сообщение должно быть system")
     if msgs[-1]["role"] != "assistant" or not msgs[-1].get("content"): err("последнее сообщение — текстовый ответ ассистента")
-    pending = None
+    pending, starosta = None, msgs[0].get("content", "").endswith(STAROSTA_MARK)
     for i, m in enumerate(msgs):
         if m["role"] == "assistant" and m.get("tool_calls"):
             for c in m["tool_calls"]:
                 name, args = c["function"]["name"], c["function"]["arguments"]
                 stats[name] += 1
                 if name not in tools: err(f"неизвестный инструмент {name}"); continue
+                if name.startswith("group_") and not starosta: err(f"{name} у студента: в его промпте этого инструмента нет")
                 props, req = tools[name]["properties"], tools[name].get("required", [])
                 for k in req:
                     if k not in args: err(f"{name}: нет обязательного аргумента {k}")

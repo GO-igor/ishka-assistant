@@ -100,7 +100,7 @@
   "type": "function",
   "function": {
    "name": "list_homework",
-   "description": "Д/З, срок которых не прошёл.",
+   "description": "Д/З, срок которых не прошёл (своё и выданное старостой).",
    "parameters": {
     "type": "object",
     "properties": {
@@ -169,7 +169,7 @@
   "type": "function",
   "function": {
    "name": "list_notes",
-   "description": "Найти заметки и напоминания.",
+   "description": "Найти заметки и напоминания (свои и от старосты).",
    "parameters": {
     "type": "object",
     "properties": {
@@ -185,7 +185,7 @@
   "type": "function",
   "function": {
    "name": "get_daily_brief",
-   "description": "Брифинг на день: пары, переходы, Д/З, дедлайны, экзамены.",
+   "description": "Брифинг на день: пары, переходы, Д/З, дедлайны, экзамены, новости от старосты.",
    "parameters": {
     "type": "object",
     "properties": {
@@ -437,6 +437,152 @@
      }
     },
     "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "get_events",
+   "description": "Мероприятия и хакатоны: ближайшие по ТПУ и от старосты.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "kind": {
+      "type": "string",
+      "enum": [
+       "хакатон",
+       "конференция",
+       "олимпиада",
+       "конкурс",
+       "мастер-класс"
+      ]
+     },
+     "period": {
+      "type": "string",
+      "enum": [
+       "week",
+       "month",
+       "all"
+      ],
+      "description": "на сколько вперёд, по умолчанию month"
+     }
+    },
+    "required": []
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "group_add_homework",
+   "description": "Только староста: выдать Д/З всей группе (или подгруппе).",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "subject": {
+      "type": "string"
+     },
+     "task": {
+      "type": "string"
+     },
+     "due": {
+      "type": "string",
+      "description": "next_class|tomorrow|monday..saturday|YYYY-MM-DD"
+     },
+     "subgroup": {
+      "type": "integer",
+      "enum": [
+       1,
+       2,
+       3
+      ],
+      "description": "только этой подгруппе; без него — всей группе"
+     }
+    },
+    "required": [
+     "subject",
+     "task"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "group_add_event",
+   "description": "Только староста: разослать группе мероприятие.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "title": {
+      "type": "string"
+     },
+     "date": {
+      "type": "string",
+      "description": "YYYY-MM-DD|tomorrow|monday..sunday"
+     },
+     "time": {
+      "type": "string",
+      "description": "HH:MM"
+     },
+     "place": {
+      "type": "string"
+     },
+     "subgroup": {
+      "type": "integer",
+      "enum": [
+       1,
+       2,
+       3
+      ],
+      "description": "только этой подгруппе; без него — всей группе"
+     }
+    },
+    "required": [
+     "title",
+     "date"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "group_create_reminder",
+   "description": "Только староста: напоминание всей группе. ЛИБО in_minutes/in_hours/in_days, ЛИБО at.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "text": {
+      "type": "string"
+     },
+     "in_minutes": {
+      "type": "integer"
+     },
+     "in_hours": {
+      "type": "integer"
+     },
+     "in_days": {
+      "type": "integer"
+     },
+     "at": {
+      "type": "string",
+      "description": "HH:MM|tomorrow HH:MM|monday HH:MM|YYYY-MM-DD HH:MM"
+     },
+     "subgroup": {
+      "type": "integer",
+      "enum": [
+       1,
+       2,
+       3
+      ],
+      "description": "только этой подгруппе; без него — всей группе"
+     }
+    },
+    "required": [
+     "text"
+    ]
    }
   }
  }

@@ -1,5 +1,5 @@
 """Промпт ровно в том виде, в каком модель видела диалоги при обучении.
-train_qlora.py собирает примеры через tok.apply_chat_template(messages, tools=TOOLS): шаблон чата + jinja2
+train_qlora.py собирает примеры через tok.apply_chat_template(messages, tools=tools_for(messages)): шаблон чата + jinja2
 с настройками transformers. Здесь то же самое, но без transformers — нужен только jinja2 (pip install jinja2).
 
 Шаблонов два:
@@ -20,6 +20,11 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = json.load(open(os.path.join(HERE, "tools.json"), encoding="utf-8"))
+# Рассылки группе видит в промпте только староста: у студента промпт на ~500 токенов короче (обучение быстрее,
+# первый ответ тоже), а модель не может даже попытаться разослать что-то группе. Права всё равно проверяет backend.py.
+GROUP_TOOLS = {t["function"]["name"] for t in TOOLS if t["function"]["name"].startswith("group_")}
+STUDENT_TOOLS = [t for t in TOOLS if t["function"]["name"] not in GROUP_TOOLS]
+STAROSTA_MARK = "; староста группы."  # так gen_dataset.system() заканчивает профиль старосты в системном промпте
 TEMPLATE = open(os.path.join(HERE, "chat_template.jinja"), encoding="utf-8").read()
 
 
@@ -52,9 +57,19 @@ def _compile(template):
     return _compiled[text]
 
 
-def render(messages, tools=TOOLS, add_generation_prompt=False, template=None):
+def tools_for(messages):
+    """Инструменты в промпте этого диалога: все для старосты, без рассылок группе для студента.
+    Роль берётся из системного промпта, поэтому train_qlora.py, evaluate.py и chat.py выбирают одинаково."""
+    first = messages[0] if messages else {}
+    starosta = first.get("role") == "system" and (first.get("content") or "").endswith(STAROSTA_MARK)
+    return TOOLS if starosta else STUDENT_TOOLS
+
+
+def render(messages, tools=None, add_generation_prompt=False, template=None):
     """Текст для модели; add_generation_prompt=True дописывает '<|im_start|>assistant\\n' — дальше пишет модель.
-    template — текст другого шаблона (например, из .gguf), по умолчанию chat_template.jinja."""
+    tools по умолчанию — tools_for(messages). template — текст другого шаблона (например, из .gguf),
+    по умолчанию chat_template.jinja."""
+    tools = tools_for(messages) if tools is None else tools
     return _compile(template).render(messages=messages, tools=tools, documents=None,
                                      add_generation_prompt=add_generation_prompt)
 
@@ -72,14 +87,15 @@ def answer_prefix(template=None):
     return full[len(head):full.index(mark)]
 
 
-def prompt_diff(other, dialogs, tools=TOOLS, template=None, gen_only=False):
+def prompt_diff(other, dialogs, tools=None, template=None, gen_only=False):
     """Первое место, где другой шаблон (текст jinja или функция (messages, gen) -> текст) собирает промпт
     не так, как template (по умолчанию chat_template.jinja): (наш, их) или None, если на всех диалогах совпало.
     Сравниваем готовые промпты, а не текст шаблонов: шаблон может быть записан иначе, но давать то же самое.
     gen_only=True — только промпты, которые видит модель при ответе (диалог до каждого хода ассистента)."""
     if isinstance(other, str):
         t = _compile(other)
-        other = lambda m, gen: t.render(messages=m, tools=tools, documents=None, add_generation_prompt=gen)
+        other = lambda m, gen: t.render(messages=m, tools=tools_for(m) if tools is None else tools, documents=None,
+                                        add_generation_prompt=gen)
     for m in dialogs:
         parts = [(m[:k], True) for k, x in enumerate(m) if x["role"] == "assistant"]
         for part, gen in parts if gen_only else [(m, False)] + parts:
