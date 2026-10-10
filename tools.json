@@ -465,7 +465,7 @@
        "month",
        "all"
       ],
-      "description": "на сколько вперёд, по умолчанию month"
+      "description": "week — 7 дней вперёд, month — 31 день (по умолчанию), all — все"
      }
     },
     "required": []

@@ -7,11 +7,12 @@
     python accounts.py passwd ivanov                          # новый пароль
     python accounts.py remove ivanov
 Пароль спрашивается при вводе (не виден на экране); --password ПАРОЛЬ — задать сразу, --generate — придумать случайный.
-Таблица для import (CSV, первая строка — заголовок): login,password,role,group,subgroup,english,name,adaptation
-Пустой password — пароль придумается сам, все новые пароли попадут в файл --out (раздай их студентам)."""
-import argparse, csv, getpass, sqlite3, unicodedata
+Таблица для import (CSV в UTF-8, первая строка — заголовок): login,password,role,group,subgroup,english,name,adaptation
+Разделитель — запятая или точка с запятой. Пустой password — пароль придумается сам; новые пароли допишутся
+в файл --out (раздай их студентам). Логины без учёта регистра: Ivanov и ivanov — один аккаунт."""
+import argparse, csv, getpass, os, sqlite3, unicodedata
 from backend import ENG_TEACHERS
-from store import ROLES, Store, new_password
+from store import ROLES, Store, login_key, new_password
 
 ap = argparse.ArgumentParser(description="Аккаунты Ишки", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
 ap.add_argument("--db", help="файл базы (по умолчанию db/ishka.sqlite)")
@@ -89,40 +90,59 @@ if a.cmd == "add":
         raise SystemExit(f"Логин «{a.login}» уже занят")
     except ValueError as e:
         raise SystemExit(f"Не добавлен: {e}")
-    print(f"Готово: {a.login} ({'староста' if a.role == 'starosta' else 'студент'}, группа {a.group})")
+    acc = st.account(login=a.login)
+    print(f"Готово: {acc['login']} ({'староста' if a.role == 'starosta' else 'студент'}, группа {acc['grp']})")
 elif a.cmd == "import":
-    out, n = [], 0
-    with open(a.csv, encoding="utf-8-sig", newline="") as f:
-        for i, row in enumerate(csv.DictReader(f), 2):
-            row = {k.strip().lower(): (v or "").strip() for k, v in row.items() if k}
-            if not row.get("login"):
-                continue
-            pw = row.get("password") or new_password()
-            role = row.get("role") or "student"
-            if role in ("староста",):
-                role = "starosta"
-            elif role in ("студент",):
-                role = "student"
-            try:
-                st.add_account(nfc(row["login"]), pw, nfc(row.get("group")), role=role, name=nfc(row.get("name")) or None,
-                               subgroup=int(row["subgroup"]) if row.get("subgroup") else None,
-                               english_teacher=teacher(row.get("english")),
-                               adaptation=row.get("adaptation", "").lower() in ("1", "yes", "да", "true"))
-            except (sqlite3.IntegrityError, ValueError) as e:
-                print(f"строка {i}: {row['login']} — пропущена ({'логин уже занят' if isinstance(e, sqlite3.IntegrityError) else e})")
-                continue
-            n += 1
-            out.append({"login": row["login"], "password": pw if not row.get("password") else "(из таблицы)"})
-    print(f"Добавлено аккаунтов: {n}")
+    try:
+        text = open(a.csv, encoding="utf-8-sig", newline="").read()
+    except UnicodeDecodeError:
+        raise SystemExit("Таблица не в UTF-8: сохрани её как «CSV UTF-8» (Excel) или «CSV, Юникод (UTF-8)» и повтори")
+    head = text.split("\n", 1)[0]
+    rows = csv.DictReader(text.splitlines(), delimiter=";" if head.count(";") > head.count(",") else ",")
+    if "login" not in [(k or "").strip().lower() for k in rows.fieldnames or []]:
+        raise SystemExit("В первой строке таблицы нет колонки login. Нужен заголовок: "
+                         "login,password,role,group,subgroup,english,name,adaptation")
+    # пароли дописываем в --out сразу: если что-то прервётся, уже заведённые аккаунты не останутся без пароля
+    outf = None
     if a.out:
-        with open(a.out, "w", encoding="utf-8", newline="") as f:
-            w = csv.DictWriter(f, ["login", "password"])
+        new_file = not os.path.exists(a.out) or os.path.getsize(a.out) == 0
+        try:
+            outf = open(a.out, "a", encoding="utf-8", newline="")
+        except OSError as e:
+            raise SystemExit(f"Не могу записать {a.out}: {e.strerror}")
+        w = csv.DictWriter(outf, ["login", "password"])
+        if new_file:
             w.writeheader()
-            w.writerows(out)
-        print(f"Логины и пароли: {a.out}")
-    else:
-        for r in out:
-            print(f"  {r['login']}: {r['password']}")
+    n = 0
+    for i, row in enumerate(rows, 2):
+        row = {k.strip().lower(): (v or "").strip() for k, v in row.items() if k}
+        if not any(row.values()):
+            continue
+        if not row.get("login"):
+            print(f"строка {i}: пустой login — пропущена")
+            continue
+        pw = row.get("password") or new_password()
+        role = (row.get("role") or "student").lower()
+        role = {"староста": "starosta", "студент": "student"}.get(role, role)
+        try:
+            st.add_account(nfc(row["login"]), pw, nfc(row.get("group")), role=role, name=nfc(row.get("name")) or None,
+                           subgroup=int(row["subgroup"]) if row.get("subgroup") else None,
+                           english_teacher=teacher(row.get("english")),
+                           adaptation=row.get("adaptation", "").lower() in ("1", "yes", "да", "true"))
+        except (sqlite3.IntegrityError, ValueError) as e:
+            print(f"строка {i}: {row['login']} — пропущена ({'логин уже занят' if isinstance(e, sqlite3.IntegrityError) else e})")
+            continue
+        n += 1
+        pair = {"login": login_key(row["login"]), "password": pw if not row.get("password") else "(из таблицы)"}
+        if outf:
+            w.writerow(pair)
+            outf.flush()
+        else:
+            print(f"  {pair['login']}: {pair['password']}")
+    print(f"Добавлено аккаунтов: {n}")
+    if outf:
+        outf.close()
+        print(f"Логины и новые пароли дописаны в {a.out}")
 elif a.cmd == "list":
     rows = st.accounts()
     if not rows:
@@ -139,7 +159,11 @@ elif a.cmd == "edit":
         f["adaptation"] = a.adaptation == "yes"
     if not f:
         raise SystemExit("Нечего менять: укажи --role, --group, --subgroup, --english, --name или --adaptation")
-    if not st.update_account(a.login, **f):
+    try:
+        found = st.update_account(a.login, **f)
+    except ValueError as e:
+        raise SystemExit(f"Не изменён: {e}")
+    if not found:
         raise SystemExit(f"Аккаунта «{a.login}» нет")
     print("Готово")
 elif a.cmd == "passwd":

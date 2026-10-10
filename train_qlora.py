@@ -30,6 +30,9 @@ if root.startswith("/content/drive") and not os.path.isdir("/content/drive/MyDri
 h = hashlib.sha1(json.dumps([BASE, MAX_LEN, HP]).encode())
 for f in ("data/train.jsonl", "tools.json", "chat_template.jinja"):  # eval на веса не влияет
     h.update(open(f, "rb").read())
+# какие инструменты попадают в промпт каждого примера (рассылки — только у старосты, prompt_format.tools_for)
+h.update(json.dumps([[t["function"]["name"] for t in tools_for(json.loads(l)["messages"])]
+                     for l in open("data/train.jsonl", encoding="utf-8")]).encode())
 CKPT = os.path.join(root, "ckpt-" + h.hexdigest()[:10])
 
 

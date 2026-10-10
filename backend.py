@@ -394,7 +394,8 @@ class Backend:
         return out
 
     def list_homework(self, subject=None, due=None):
-        group = [dict(p, expires=p["due"][:10], from_starosta=True) for p in self._posts("homework")]  # от старосты
+        group = [dict(p, due=d, expires=d[:10], from_starosta=True)  # от старосты, срок по расписанию читающего
+                 for p in self._posts("homework") for d in [self._post_due(p)]]
         if subject and not resolve_subject(subject) and not any(self._same_subject(subject, h) for h in self.homework + group):
             return {"error": "subject_not_found", "subject": subject}
         day = self.parse_due(due).isoformat() if due else None
@@ -515,7 +516,8 @@ class Backend:
                 continue
             if a["building"] and b["building"] and a["building"] != b["building"]:
                 s["lessons"][i]["walk_from_prev_minutes"] = walk_minutes(a["building"], b["building"])
-        s["homework"] = self.list_homework(due=d.isoformat())["items"]
+        # Д/З от старосты — только в строке from_starosta, чтобы не повторять его дважды
+        s["homework"] = [h for h in self.list_homework(due=d.isoformat())["items"] if not h.get("from_starosta")]
         s["deadlines"] = [x for x in self.list_deadlines()["items"] if x["days_left"] <= 7]
         s["exams"] = [x for x in self.get_exams()["items"] if 0 <= x["days_left"] <= 14]
         fs = self.starosta_news()
@@ -524,6 +526,8 @@ class Backend:
         return s
 
     def set_profile(self, subgroup=None, english_teacher=None, adaptation=None):
+        if subgroup is not None and subgroup not in (1, 2, 3):
+            return {"error": "bad_subgroup"}
         if english_teacher:  # «Аксёнова», «аксеновой» → «Аксёнова Н. В.»
             key = english_teacher.lower().replace("ё", "е")[:5]
             hits = [t for t in ENG_TEACHERS if t.lower().replace("ё", "е").startswith(key)]
@@ -545,7 +549,7 @@ class Backend:
         items = []
         for e in self.events + group:
             left = (dt.date.fromisoformat(e["date"]) - today).days
-            if left < 0 or (limit is not None and left > limit):
+            if left < 0 or (limit is not None and left > limit) or self._started(e, left):
                 continue
             if kind and e.get("kind") != kind and kind.lower()[:6] not in e["title"].lower():
                 continue
@@ -560,6 +564,10 @@ class Backend:
             out["more"] = len(items) - 10
         return out
 
+    def _started(self, e, left):
+        """Мероприятие сегодня, и время начала уже прошло (как в group_add_event: такое не показываем)."""
+        return left == 0 and bool(e.get("time")) and e["time"] <= self.now.strftime("%H:%M")
+
     # ---------- рассылки старосты ----------
     def _posts(self, kind=None):
         """Актуальные рассылки старосты для группы и подгруппы студента (если он вошёл в аккаунт)."""
@@ -573,11 +581,12 @@ class Backend:
         week = self._fmt(self.now + dt.timedelta(days=7))
         for p in self._posts():
             if p["kind"] == "homework":
-                if (p["due"] > now_s if " " in p["due"] else p["due"] >= now_s[:10]):
-                    out.append(({"kind": "homework", "subject": p["subject"], "task": p["task"], "due": p["due"]}, p["due"]))
+                due = self._post_due(p)
+                if (due > now_s if " " in due else due >= now_s[:10]):
+                    out.append(({"kind": "homework", "subject": p["subject"], "task": p["task"], "due": due}, due))
             elif p["kind"] == "event":
                 left = (dt.date.fromisoformat(p["date"]) - self.now.date()).days
-                if 0 <= left <= 14:
+                if 0 <= left <= 14 and not self._started(p, left):
                     o = {"kind": "event", "title": p["title"], "date": p["date"]}
                     o.update({k: p[k] for k in ("time", "place") if p.get(k)})
                     out.append((o | {"days_left": left}, f"{p['date']} {p.get('time') or ''}"))
@@ -609,17 +618,37 @@ class Backend:
             return err
         code = resolve_subject(subject)
         name = SUBJECTS[code]["name"] if code else subject
-        # «к следующей паре» — по расписанию той подгруппы, которой задали (лабы у подгрупп в разное время)
+        due = due or "next_class"
+        # «к следующей паре» (и время пары в названный день) у каждого своё: лабы у подгрупп и английский у групп
+        # преподавателей в разное время. Поэтому в рассылке хранится сам срок (spec), а время пары каждый студент
+        # получает по своему расписанию (_post_due). Здесь — срок для того, кому задали, и самый поздний из всех.
         b = self if not subgroup or subgroup == self.profile.get("subgroup") else Backend(self.now, dict(self.profile, subgroup=subgroup))
-        r = b._homework_due(code, name, due or "next_class")
+        r = b._homework_due(code, name, due)
         if "error" in r:
             return r
-        until = r["due"] if " " in r["due"] else r["due"] + " 23:59"
-        sent = self._post("homework", {"code": code, "subject": name, "task": task, "due": r["due"]}, until, subgroup)
+        dues = {x["due"] for x in (Backend(self.now, p)._homework_due(code, name, due) for p in self._readers(subgroup))
+                if "error" not in x} or {r["due"]}
+        until = max(d if " " in d else d + " 23:59" for d in dues | {r["due"]})
+        data = {"code": code, "subject": name, "task": task, "due": r["due"], "spec": due}
+        sent = self._post("homework", data, until, subgroup)
         out = {"ok": True, "subject": name, "due": r["due"]}
         if r["no_class_that_day"]:
             out["no_class_that_day"] = True
+        if len(dues) > 1:
+            out["due_differs"] = True  # у разных подгрупп (групп английского) пара в разное время
         return out | sent
+
+    def _readers(self, subgroup):
+        """Возможные профили получателей рассылки: подгруппа × преподаватель английского × курсы (А)."""
+        return [{"subgroup": s, "english_teacher": t, "adaptation": a}
+                for s in ([subgroup] if subgroup else [1, 2, 3]) for t in ENG_TEACHERS for a in (False, True)]
+
+    def _post_due(self, p):
+        """Срок Д/З из рассылки по расписанию этого студента: «к следующей паре» считаем от момента рассылки."""
+        if not p.get("spec") or not p.get("code"):
+            return p["due"]
+        r = Backend(dt.datetime.fromisoformat(p["created"]), self.profile)._homework_due(p["code"], p["subject"], p["spec"])
+        return r.get("due", p["due"])
 
     def group_add_event(self, title, date, time=None, place=None, subgroup=None):
         err = self._starosta(subgroup)
@@ -642,7 +671,7 @@ class Backend:
             return {"error": "date_in_past"}
         data = {"title": title, "date": d.isoformat()}
         data.update({k: v for k, v in (("time", time), ("place", place)) if v})
-        sent = self._post("event", data, f"{d} 23:59", subgroup)
+        sent = self._post("event", data, f"{d} {time or '23:59'}", subgroup)  # после начала не показываем
         return {"ok": True} | data | {"days_left": left} | sent
 
     def group_create_reminder(self, text, in_minutes=None, in_hours=None, in_days=None, at=None, subgroup=None):

@@ -130,8 +130,10 @@ python accounts.py add ivanov --group 8К51 --subgroup 2 --english Аксёно�
 python accounts.py list
 ```
 
-Всю группу сразу можно завести из таблицы (CSV с колонками `login,password,role,group,subgroup,english,name,adaptation`):
-`python accounts.py import group.csv --out passwords.csv`. Пустой пароль придумается сам и попадёт в `passwords.csv`.
+Всю группу сразу можно завести из таблицы (CSV в UTF-8 с колонками `login,password,role,group,subgroup,english,name,adaptation`,
+разделитель — запятая или точка с запятой): `python accounts.py import group.csv --out passwords.csv`.
+Пустой пароль придумается сам и допишется в `passwords.csv`. Таблицы `.csv` в папке проекта в git не попадают: в них имена и пароли.
+Логины без учёта регистра (`Ivanov` и `ivanov` — один аккаунт), группу можно писать как `8К51`, `8к51` или латиницей `8K51`.
 Остальные команды: `edit` (сменить роль, группу, подгруппу), `passwd` (новый пароль), `remove`; подробности в `python accounts.py -h`.
 
 Войти в чат под аккаунтом (подгруппа и английский берутся из аккаунта):
