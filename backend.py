@@ -624,18 +624,27 @@ class Backend:
         # получает по своему расписанию (_post_due). Здесь — срок для того, кому задали, и самый поздний из всех.
         b = self if not subgroup or subgroup == self.profile.get("subgroup") else Backend(self.now, dict(self.profile, subgroup=subgroup))
         r = b._homework_due(code, name, due)
-        if "error" in r:
+        if r.get("error") in ("bad_date", "due_in_past"):
             return r
-        dues = {x["due"] for x in (Backend(self.now, p)._homework_due(code, name, due) for p in self._readers(subgroup))
-                if "error" not in x} or {r["due"]}
-        until = max(d if " " in d else d + " 23:59" for d in dues | {r["due"]})
+        # срок у каждого возможного получателя; due_differs — только среди тех, у кого этот предмет вообще есть
+        # (курсы (А) — не у всех, у самого старосты предмета может не быть)
+        alls = [(has, x) for has, x in ((not code or Backend(self.now, p).next_class_of(code) is not None,
+                                          Backend(self.now, p)._homework_due(code, name, due)) for p in self._readers(subgroup))
+                if "error" not in x]
+        outs = [x for has, x in alls if has]
+        if "error" in r or (code and b.next_class_of(code) is None):
+            if not outs:
+                return r
+            r = min(outs, key=lambda x: x["due"])
+        dues = {x["due"] for x in outs} | {r["due"]}
+        until = max(d if " " in d else d + " 23:59" for d in dues | {x["due"] for _, x in alls})
         data = {"code": code, "subject": name, "task": task, "due": r["due"], "spec": due}
         sent = self._post("homework", data, until, subgroup)
         out = {"ok": True, "subject": name, "due": r["due"]}
-        if r["no_class_that_day"]:
-            out["no_class_that_day"] = True
         if len(dues) > 1:
             out["due_differs"] = True  # у разных подгрупп (групп английского) пара в разное время
+        elif r["no_class_that_day"]:
+            out["no_class_that_day"] = True
         return out | sent
 
     def _readers(self, subgroup):
@@ -647,7 +656,8 @@ class Backend:
         """Срок Д/З из рассылки по расписанию этого студента: «к следующей паре» считаем от момента рассылки."""
         if not p.get("spec") or not p.get("code"):
             return p["due"]
-        r = Backend(dt.datetime.fromisoformat(p["created"]), self.profile)._homework_due(p["code"], p["subject"], p["spec"])
+        prof = dict(self.profile, subgroup=p["subgroup"]) if p.get("subgroup") else self.profile  # рассылка подгруппе
+        r = Backend(dt.datetime.fromisoformat(p["created"]), prof)._homework_due(p["code"], p["subject"], p["spec"])
         return r.get("due", p["due"])
 
     def group_add_event(self, title, date, time=None, place=None, subgroup=None):
