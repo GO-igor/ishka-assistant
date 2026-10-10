@@ -10,7 +10,7 @@
 Таблица для import (CSV в UTF-8, первая строка — заголовок): login,password,role,group,subgroup,english,name,adaptation
 Разделитель — запятая или точка с запятой. Пустой password — пароль придумается сам; новые пароли допишутся
 в файл --out (раздай их студентам). Логины без учёта регистра: Ivanov и ivanov — один аккаунт."""
-import argparse, csv, getpass, os, sqlite3, unicodedata
+import argparse, csv, getpass, io, os, sqlite3, unicodedata
 from backend import ENG_TEACHERS
 from store import ROLES, Store, login_key, new_password
 
@@ -97,8 +97,10 @@ elif a.cmd == "import":
         text = open(a.csv, encoding="utf-8-sig", newline="").read()
     except UnicodeDecodeError:
         raise SystemExit("Таблица не в UTF-8: сохрани её как «CSV UTF-8» (Excel) или «CSV, Юникод (UTF-8)» и повтори")
+    except OSError as e:
+        raise SystemExit(f"Не могу прочитать {a.csv}: {e.strerror}")
     head = text.split("\n", 1)[0]
-    rows = csv.DictReader(text.splitlines(), delimiter=";" if head.count(";") > head.count(",") else ",")
+    rows = csv.DictReader(io.StringIO(text, newline=""), delimiter=";" if head.count(";") > head.count(",") else ",")
     if "login" not in [(k or "").strip().lower() for k in rows.fieldnames or []]:
         raise SystemExit("В первой строке таблицы нет колонки login. Нужен заголовок: "
                          "login,password,role,group,subgroup,english,name,adaptation")
@@ -107,14 +109,21 @@ elif a.cmd == "import":
     if a.out:
         new_file = not os.path.exists(a.out) or os.path.getsize(a.out) == 0
         try:
+            if not new_file:  # файл правили руками и не поставили перевод строки в конце — иначе склеится строка
+                with open(a.out, "rb") as f:
+                    f.seek(-1, 2)
+                    no_newline = f.read(1) != b"\n"
             outf = open(a.out, "a", encoding="utf-8", newline="")
         except OSError as e:
             raise SystemExit(f"Не могу записать {a.out}: {e.strerror}")
         w = csv.DictWriter(outf, ["login", "password"])
         if new_file:
             w.writeheader()
+        elif no_newline:
+            outf.write("\r\n")
     n = 0
-    for i, row in enumerate(rows, 2):
+    for row in rows:
+        i = rows.line_num  # номер строки в файле, как в редакторе
         row = {k.strip().lower(): (v or "").strip() for k, v in row.items() if k}
         if not any(row.values()):
             continue

@@ -6,4 +6,4 @@ __pycache__/
 diag_gguf_template.jinja
 db/*.sqlite
 db/*.sqlite-journal
-/*.csv
+*.csv

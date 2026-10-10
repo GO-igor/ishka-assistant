@@ -99,6 +99,21 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
+        self._normalize()
+
+    def _normalize(self):
+        """База от первой версии: логины и группы хранились как введены (Петров, 8к51) — приводим к login_key/group_key."""
+        for r in self.db.execute("SELECT id, login, grp FROM accounts").fetchall():
+            if (r["login"], r["grp"]) != (login_key(r["login"]), group_key(r["grp"])):
+                try:
+                    self.db.execute("UPDATE accounts SET login = ?, grp = ? WHERE id = ?",
+                                    (login_key(r["login"]), group_key(r["grp"]), r["id"]))
+                except sqlite3.IntegrityError:  # «Петров» и «петров» — два аккаунта: логин оставляем как есть
+                    self.db.execute("UPDATE accounts SET grp = ? WHERE id = ?", (group_key(r["grp"]), r["id"]))
+        for r in self.db.execute("SELECT DISTINCT grp FROM group_posts").fetchall():
+            if r["grp"] != group_key(r["grp"]):
+                self.db.execute("UPDATE group_posts SET grp = ? WHERE grp = ?", (group_key(r["grp"]), r["grp"]))
+        self.db.commit()
 
     # ---------- аккаунты ----------
     def add_account(self, login, password, group, role="student", name=None, subgroup=None,
