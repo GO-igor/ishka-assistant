@@ -3,6 +3,7 @@
 Изменяемые данные (Д/З, заметки, напоминания, дедлайны, экзамены) — в памяти; если студент вошёл в аккаунт
 (store + account_id), они сохраняются в db/ishka.sqlite (store.py). Там же рассылки старосты группе."""
 import datetime as dt, json, pathlib, re
+from collections import Counter
 from guard import Guard
 
 DB = pathlib.Path(__file__).parent / "db"
@@ -19,7 +20,18 @@ WD_RU = ["понедельник", "вторник", "среда", "четвер
 EAT_MINUTES = 15  # сколько нужно на сам перекус
 EVENT_KINDS = ["хакатон", "конференция", "олимпиада", "конкурс", "мастер-класс"]
 EVENT_PERIODS = {"week": 7, "month": 31, "all": None}  # сколько дней вперёд смотреть
-SAVE_AFTER = {"add_homework", "create_reminder", "add_note", "add_deadline", "add_exam", "set_daily_brief"}
+PERSIST = ("homework", "notes", "reminders", "deadlines", "exams", "brief", "hidden")  # что хранится в user_data
+LIMITS = {"note": 10, "reminder": 10}  # сколько своих заметок и активных напоминаний можно держать
+GROUP_LIMITS = {"homework": 10, "event": 10, "reminder": 10}  # сколько действующих рассылок старосты каждого вида
+DELETE_KINDS = ("note", "reminder", "homework", "deadline", "exam", "event")
+POST_KINDS = ("homework", "event", "reminder")
+DELETE_TOOLS = {"delete_items", "group_delete_post"}
+TEXT_KEYS = ("text", "subject", "task", "title", "place", "kind")  # где искать слова из query при удалении
+POST_SHOW = {"homework": ("subject", "task", "due"), "event": ("title", "date", "time", "place"), "reminder": ("text", "fire_at")}
+OWN_KEYS = {"reminder": ("text", "fire_at"), "homework": ("subject", "task", "due"), "deadline": ("title", "subject", "due"),
+            "exam": ("subject", "kind", "date")}  # по этим полям своя запись узнаётся после удаления соседних
+STOP = {"по", "в", "во", "на", "с", "со", "к", "ко", "и", "о", "об", "про", "для", "от", "до", "за", "из", "у", "мою",
+        "мой", "мое", "моё", "мои", "мне", "все", "всё"}  # предлоги и местоимения в query не мешают поиску
 MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
 
 
@@ -73,14 +85,67 @@ def walk_minutes(a, b):
     return None
 
 
-def prune(data, now):
+def _words(text):
+    return re.findall(r"\w+", str(text or "").lower().replace("ё", "е"))
+
+
+def _stem(w):
+    if len(w) == 4 and w[-1] in "аеиоуыэюяьй":  # «лаба» находит «лабу», «мама» — «маме»
+        return w[:3]
+    return w if len(w) <= 4 else w[:len(w) - (1 if len(w) <= 6 else 2)]  # «проект» → «проек», не «прое»
+
+
+def _stems(query):
+    """Основы слов запроса: «вайфай» находит «вайфая», «староста» — «старосты». Предлоги («про», «по») не считаем."""
+    return [_stem(w) for w in _words(query) if w not in STOP]
+
+
+def _hit(stems, text):
+    words = _words(text)
+    return all(any(w.startswith(s) for w in words) for s in stems)
+
+
+def _nums(x):
+    """Номера из аргумента numbers: [2, 4], 2, "2, 4", ["2"] → [2, 4] без повторов; что-то непонятное → None."""
+    if isinstance(x, str):
+        x = re.findall(r"-?\d+", x) or None
+    elif isinstance(x, (int, float)) and not isinstance(x, bool):
+        x = [x]
+    if not isinstance(x, list) or not x:
+        return None
+    out = []
+    for v in x:
+        if isinstance(v, str) and re.fullmatch(r"\s*-?\d+\s*", v):
+            v = int(v)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v != int(v):
+            return None
+        if int(v) not in out:
+            out.append(int(v))
+    return out
+
+
+def _hidden_alive(h, today, live):
+    """Скрытая студентом рассылка (post:id) нужна, пока рассылка есть в базе; мероприятие ТПУ (ev:дата|название) —
+    пока не прошла дата. live — id рассылок в базе (None — не знаем, оставляем)."""
+    if not isinstance(h, str):
+        return False
+    if h.startswith("ev:"):
+        return h[3:13] >= today
+    if h.startswith("post:"):
+        return live is None or not h[5:].isdigit() or int(h[5:]) in live
+    return True
+
+
+def prune(data, now, live=None):
     """Убирает из личных данных то, что уже прошло: Д/З после срока хранения (expires, неделя или до дня после сдачи),
-    сработавшие напоминания, прошедшие дедлайны и экзамены. Заметки без даты не трогаем. Возвращает число удалённых."""
+    сработавшие напоминания, прошедшие дедлайны и экзамены, скрытые рассылки, которых уже нет (live — id рассылок
+    в базе). Заметки без даты не трогаем. Возвращает число удалённых."""
     today, now_s = now.date().isoformat(), now.strftime("%Y-%m-%d %H:%M")
     keep = {"homework": lambda h: h.get("expires", "9999") >= today,
             "reminders": lambda r: r.get("fire_at", "9999") > now_s,
             "deadlines": lambda x: x.get("due", "9999") >= today,
-            "exams": lambda e: e.get("date", "9999") >= today}
+            "exams": lambda e: e.get("date", "9999") >= today,
+            "hidden": lambda h: _hidden_alive(h, today, live)}
     removed = 0
     for k, ok in keep.items():
         old = data.get(k) or []
@@ -95,29 +160,39 @@ class Backend:
         self.now, self.profile = now, profile
         self.store, self.account_id = store, account_id  # store.Store; без них всё живёт до конца сеанса
         self.homework, self.notes, self.reminders, self.deadlines, self.exams = [], [], [], [], []
+        self.hidden = []  # что студент убрал у себя: рассылки старосты (post:id) и мероприятия ТПУ (ev:дата|название)
         self.brief = {"enabled": True, "time": "07:30"}
         self.events = EVENTS
+        # Состояние разговора, в базу не пишется: какой список с номерами показан последним (номера в delete_items
+        # относятся к нему) и что ждёт подтверждения «удалить все». Сайту нужен один Backend на разговор
+        # (или хранить shown и pending вместе с историей сообщений).
+        self.shown, self.pending = {}, None
+        self.limits, self.group_limits = dict(LIMITS), dict(GROUP_LIMITS)  # можно поменять для одного Backend
         if store is not None and account_id is not None:
             data = store.load_data(account_id)
-            for k in ("homework", "notes", "reminders", "deadlines", "exams"):
+            for k in ("homework", "notes", "reminders", "deadlines", "exams", "hidden"):
                 setattr(self, k, data.get(k, []))
             self.brief = data.get("brief", self.brief)
 
     def cleanup(self):
         """Удалить из своих данных прошедшее (prune) и сохранить. Возвращает число удалённых записей."""
-        data = {k: getattr(self, k) for k in ("homework", "reminders", "deadlines", "exams")}
-        n = prune(data, self.now)
+        live = None
+        if self.store is not None and self.profile.get("group"):
+            live = {p["id"] for p in self.store.posts(self.profile["group"], after=self._fmt(self.now))}
+        data = {k: getattr(self, k) for k in ("homework", "reminders", "deadlines", "exams", "hidden")}
+        n = prune(data, self.now, live)
         if n:
             for k, v in data.items():
                 setattr(self, k, v)
             self.save()
         return n
 
+    def _data(self):
+        return {k: getattr(self, k) for k in PERSIST}
+
     def save(self):
         if self.store is not None and self.account_id is not None:
-            self.store.save_data(self.account_id, {"homework": self.homework, "notes": self.notes,
-                                                   "reminders": self.reminders, "deadlines": self.deadlines,
-                                                   "exams": self.exams, "brief": self.brief})
+            self.store.save_data(self.account_id, self._data())
 
     # ---------- даты ----------
     def parse_day(self, day: str) -> dt.date:
@@ -288,20 +363,26 @@ class Backend:
                                              "need_minutes": need2, "enough_time": need2 <= brk}
         return out
 
-    def get_exams(self, subject=None):
-        items = []
+    def _exams(self, subject=None):
+        """Экзамены, которые ещё впереди, по дате: [(запись, что показать)]."""
+        out = []
         for e in self.exams:
             if subject and not self._same_subject(subject, e):
                 continue
             left = (dt.date.fromisoformat(e["date"]) - self.now.date()).days
             if left < 0:
                 continue
-            items.append({k: v for k, v in e.items() if k not in ("code", "reminders")} | {"days_left": left})
-        return {"items": sorted(items, key=lambda e: (e["date"], e.get("time", "")))}
+            out.append((e, {k: v for k, v in e.items() if k not in ("code", "reminders")} | {"days_left": left}))
+        return sorted(out, key=lambda x: (x[1]["date"], x[1].get("time", "")))
+
+    def get_exams(self, subject=None):
+        items = self._exams(subject)
+        self._remember("exam", items)
+        return {"items": [o for _, o in items]}
 
     def _same_subject(self, subject, item):
         code = resolve_subject(subject)
-        return item.get("code") == code if code else item["subject"].lower() == subject.strip().lower()
+        return item.get("code") == code if code else (item.get("subject") or "").lower() == subject.strip().lower()
 
     def add_exam(self, subject, date, kind="экзамен", time=None, room=None, building=None):
         code = resolve_subject(subject)
@@ -421,7 +502,8 @@ class Backend:
             out["no_class_that_day"] = True
         return out
 
-    def list_homework(self, subject=None, due=None):
+    def _homework(self, subject=None, due=None):
+        """Д/З, срок которого не прошёл, по сроку: [(запись, что показать)] или {"error": ...}."""
         group = [dict(p, due=d, expires=d[:10], from_starosta=True)  # от старосты, срок по расписанию читающего
                  for p in self._posts("homework") for d in [self._post_due(p)]]
         if subject and not resolve_subject(subject) and not any(self._same_subject(subject, h) for h in self.homework + group):
@@ -432,8 +514,15 @@ class Backend:
                  and (h["due"] > now_s if " " in h["due"] else h["due"] >= today)  # срок ещё не прошёл
                  and (not subject or self._same_subject(subject, h))
                  and (not day or h["due"].startswith(day))]
-        return {"items": [{k: h[k] for k in ("subject", "task", "due", "from_starosta") if k in h}
-                          for h in sorted(items, key=lambda h: h["due"])]}
+        return [(h, {k: h[k] for k in ("subject", "task", "due", "from_starosta") if k in h})
+                for h in sorted(items, key=lambda h: h["due"])]
+
+    def list_homework(self, subject=None, due=None):
+        items = self._homework(subject, due)
+        if isinstance(items, dict):
+            return items
+        self._remember("homework", items)
+        return {"items": [o for _, o in items]}
 
     # ---------- напоминания и заметки ----------
     def create_reminder(self, text, in_minutes=None, in_hours=None, in_days=None, at=None):
@@ -448,25 +537,25 @@ class Backend:
             return {"error": "time_required"}
         if fire <= self.now:
             return {"error": "time_in_past"}
+        own = [r for r in self._records("reminder") if not r[0].get("from_starosta")]
+        if len(own) >= self.limits["reminder"]:  # напоминания старосты не в счёт: их лимит у старосты
+            return {"error": "limit", "limit": self.limits["reminder"], "items": self._numbered("reminder", own, ask=True)}
         self.reminders.append({"text": text, "fire_at": self._fmt(fire)})
         return {"ok": True, "fire_at": self._fmt(fire)}
 
     def add_note(self, text):
+        if len(self.notes) >= self.limits["note"]:
+            return {"error": "limit", "limit": self.limits["note"], "items": self._numbered("note", self._records("note"), ask=True)}
         self.notes.append(text)
         return {"ok": True, "id": len(self.notes)}
 
     def list_notes(self, query=None):
-        """Поиск по основам слов: «вайфай» находит «вайфая», «староста» — «старосты»."""
-        cut = lambda w: w if len(w) <= 4 else w[:len(w) - (1 if len(w) <= 6 else 2)]  # «проект» → «проек», не «прое»
-        stems = [cut(w) for w in re.findall(r"\w+", (query or "").lower().replace("ё", "е"))]
-        def hit(text):
-            words = re.findall(r"\w+", text.lower().replace("ё", "е"))
-            return all(any(w.startswith(s) for w in words) for s in stems)
-        now_s = self._fmt(self.now)
-        group = [{"text": p["text"], "fire_at": p["fire_at"], "from_starosta": True} for p in self._posts("reminder")]
-        return {"notes": [n for n in self.notes if hit(n)],
-                "reminders": sorted((r for r in self.reminders + group if r["fire_at"] > now_s and hit(r["text"])),
-                                    key=lambda r: r["fire_at"])}
+        """Заметки и напоминания (свои и от старосты) с номерами: по ним их можно удалить (delete_items).
+        Поиск по основам слов: «вайфай» находит «вайфая», «староста» — «старосты»."""
+        stems = _stems(query)
+        notes = [r for r in self._records("note") if _hit(stems, r[0])]
+        rems = [r for r in self._records("reminder") if _hit(stems, r[0]["text"])]
+        return {"notes": self._numbered("note", notes), "reminders": self._numbered("reminder", rems)}
 
     # ---------- дедлайны лаб и курсовых ----------
     def add_deadline(self, title, due, subject=None, kind="другое"):
@@ -490,7 +579,8 @@ class Backend:
         self.deadlines.append(item)
         return {"ok": True, "due": d.isoformat(), "days_left": left, "reminders": rem}
 
-    def list_deadlines(self, subject=None, kind=None):
+    def _deadlines(self, subject=None, kind=None):
+        """Дедлайны, которые не прошли, по сроку: [(запись, что показать)] или {"error": ...}."""
         if subject and not resolve_subject(subject) and not any(self._same_subject(subject, x) for x in self.deadlines):
             return {"error": "subject_not_found", "subject": subject}
         out = []
@@ -498,8 +588,15 @@ class Backend:
             left = (dt.date.fromisoformat(x["due"]) - self.now.date()).days
             if left < 0 or (kind and x["kind"] != kind) or (subject and not self._same_subject(subject, x)):
                 continue
-            out.append({"title": x["title"], "subject": x["subject"], "due": x["due"], "days_left": left})
-        return {"items": sorted(out, key=lambda x: x["days_left"])}
+            out.append((x, {"title": x["title"], "subject": x["subject"], "due": x["due"], "days_left": left}))
+        return sorted(out, key=lambda x: x[1]["days_left"])
+
+    def list_deadlines(self, subject=None, kind=None):
+        items = self._deadlines(subject, kind)
+        if isinstance(items, dict):
+            return items
+        self._remember("deadline", items)
+        return {"items": [o for _, o in items]}
 
     # ---------- сессия ----------
     def make_study_plan(self, subject, hours_per_day=None, skip_days=None, tickets_total=None):
@@ -545,9 +642,12 @@ class Backend:
             if a["building"] and b["building"] and a["building"] != b["building"]:
                 s["lessons"][i]["walk_from_prev_minutes"] = walk_minutes(a["building"], b["building"])
         # Д/З от старосты — только в строке from_starosta, чтобы не повторять его дважды
-        s["homework"] = [h for h in self.list_homework(due=d.isoformat())["items"] if not h.get("from_starosta")]
-        s["deadlines"] = [x for x in self.list_deadlines()["items"] if x["days_left"] <= 7]
-        s["exams"] = [x for x in self.get_exams()["items"] if 0 <= x["days_left"] <= 14]
+        hw = [x for x in self._homework(due=d.isoformat()) if not x[1].get("from_starosta")]
+        dl = [x for x in self._deadlines() if x[1]["days_left"] <= 7]
+        ex = [x for x in self._exams() if 0 <= x[1]["days_left"] <= 14]
+        for ns, items in (("homework", hw), ("deadline", dl), ("exam", ex)):  # «удали первое» — из того, что в брифинге
+            self._remember(ns, items)
+        s["homework"], s["deadlines"], s["exams"] = [o for _, o in hw], [o for _, o in dl], [o for _, o in ex]
         fs = self.starosta_news()
         if fs:  # отдельной строкой в брифинге
             s["from_starosta"] = fs
@@ -570,13 +670,17 @@ class Backend:
         return {"ok": True, "profile": {k: v for k, v in self.profile.items() if k not in ("group", "role")}}
 
     # ---------- мероприятия и хакатоны ----------
-    def get_events(self, kind=None, period="month"):
-        today, limit = self.now.date(), EVENT_PERIODS.get(period, 31)
-        group = [{"title": p["title"], "date": p["date"], "time": p.get("time"), "place": p.get("place"),
+    def _events(self, kind=None, limit=None):
+        """Мероприятия ТПУ и от старосты, которые ещё не начались, по дате: [(запись, что показать)].
+        limit — сколько дней вперёд (None — все)."""
+        today = self.now.date()
+        group = [{"id": p["id"], "title": p["title"], "date": p["date"], "time": p.get("time"), "place": p.get("place"),
                   "from_starosta": True} for p in self._posts("event")]
         items = []
         for e in self.events + group:
             if GUARD.check_obj(e):  # мероприятие с запретной фразой (например, список пополнили позже) не показываем
+                continue
+            if self._ref("event", e) in self.hidden:  # студент убрал его у себя
                 continue
             left = (dt.date.fromisoformat(e["date"]) - today).days
             if left < 0 or (limit is not None and left > limit) or self._started(e, left):
@@ -587,9 +691,13 @@ class Backend:
             o["days_left"] = left
             if e.get("from_starosta"):
                 o["from_starosta"] = True
-            items.append(o)
-        items.sort(key=lambda o: (o["date"], o.get("time") or ""))
-        out = {"items": items[:10]}
+            items.append((e, o))
+        return sorted(items, key=lambda x: (x[1]["date"], x[1].get("time") or ""))
+
+    def get_events(self, kind=None, period="month"):
+        items = self._events(kind, EVENT_PERIODS.get(period, 31))
+        self._remember("event", items[:10])
+        out = {"items": [o for _, o in items[:10]]}
         if len(items) > 10:
             out["more"] = len(items) - 10
         return out
@@ -598,14 +706,146 @@ class Backend:
         """Мероприятие сегодня, и время начала уже прошло (как в group_add_event: такое не показываем)."""
         return left == 0 and bool(e.get("time")) and e["time"] <= self.now.strftime("%H:%M")
 
+    # ---------- удаление ----------
+    # Номера в delete_items и group_delete_post — из последнего списка этого вида, который видел студент (list_notes,
+    # list_homework, брифинг, список «что удалить?»): запись узнаётся по ссылке (_ref), поэтому после удаления одной
+    # («удали 2») номера остальных не сдвигаются («и 4 тоже» — та же четвёртая). Списка ещё не было — номера не угадываем,
+    # а показываем список. «Удалить все» — только после показанного списка: сначала подтверждение (confirm), удаляем
+    # следующим же вызовом. Рассылки старосты и мероприятия ТПУ студент не удаляет, а скрывает у себя (hidden).
+    def _ref(self, kind, x):
+        if kind == "note":
+            return json.dumps(["note", x], ensure_ascii=False)
+        if x.get("from_starosta"):
+            return f"post:{x['id']}"
+        if kind == "event":
+            return f"ev:{x['date']}|{x['title']}"
+        return json.dumps([kind] + [x.get(k) for k in OWN_KEYS[kind]], ensure_ascii=False)
+
+    def _records(self, kind):
+        """Всё, что студент может удалить или скрыть, в том же порядке, что и в списках: [(запись, что показать, ссылка)]."""
+        if kind == "note":
+            items = [(n, {"text": n}) for n in self.notes]
+        elif kind == "reminder":
+            now_s = self._fmt(self.now)
+            group = [dict(p, from_starosta=True) for p in self._posts("reminder")]
+            items = [(r, {k: r[k] for k in ("text", "fire_at", "from_starosta") if k in r})
+                     for r in sorted((r for r in self.reminders + group if r["fire_at"] > now_s), key=lambda r: r["fire_at"])]
+        else:
+            items = {"homework": self._homework, "deadline": self._deadlines, "exam": self._exams, "event": self._events}[kind]()
+        return [(x, o, self._ref(kind, x)) for x, o in items]
+
+    def _remember(self, kind, items):
+        self.shown[kind] = [self._ref(kind, x) for x, _ in items]
+
+    def _numbered(self, ns, recs, ask=False):
+        """Список с номерами n. Запоминаем его: номера в следующем удалении значат то же самое.
+        ask=True — список показан, чтобы выбрать, что удалить: ответ «все» на него удаляет весь список без переспроса."""
+        self.shown[ns] = [ref for _, _, ref in recs]
+        if ask:
+            self.pending = {"ns": ns, "refs": list(self.shown[ns])}
+        return [{"n": i} | o for i, (_, o, _) in enumerate(recs, 1)]
+
+    @staticmethod
+    def _matches(stems, x):
+        """Подходит ли запись под слова запроса. Предмет узнаём и по сокращениям («удали дз по питону» — а в записи
+        «Основы программирования на Python»); число («лаба 3») — только целиком и не из названия предмета («1.3»)."""
+        if isinstance(x, str):
+            main, subj = x, ""
+        else:
+            code = x.get("code") if x.get("code") in SUBJECTS else None
+            main = " ".join(str(x.get(k) or "") for k in TEXT_KEYS if not (k == "subject" and code))
+            subj = " ".join([SUBJECTS[code]["name"]] + SUBJECTS[code]["aliases"]) if code else ""
+        mw, sw = _words(main), _words(subj)
+        return all(s in mw if s.isdigit() else any(w.startswith(s) for w in mw + sw) for s in stems)
+
+    def _delete(self, ns, recs, numbers, query, all_, drop, again):
+        """Общая часть delete_items и group_delete_post. recs — что можно удалить сейчас, drop(выбранное) удаляет
+        и возвращает (удалено, скрыто), again() — список после удаления."""
+        pending, self.pending = self.pending, None
+        all_ = all_ is True or str(all_).strip().lower() in ("true", "1", "yes", "да")
+        stems = _stems(query) if isinstance(query, str) else []
+        if not recs:
+            return {"error": "nothing_to_delete"}
+        if numbers not in (None, "", []):
+            nums, shown = _nums(numbers), self.shown.get(ns)
+            if shown is None:  # список ещё не показывали: какую запись студент считает второй, не знаем
+                return {"choose": True, "items": self._numbered(ns, recs, ask=True)}
+            bad = [n for n in nums if not 1 <= n <= len(shown)] if nums else [numbers]
+            if bad:
+                return {"error": "bad_number", "numbers": bad, "items": self._numbered(ns, recs, ask=True)}
+            picked = [(n, shown[n - 1]) for n in nums]
+        elif stems or all_:
+            hits = recs
+            if stems:
+                hits = [r for r in recs if self._matches(stems, r[0])]
+                code = None if hits else resolve_subject(query)  # «матеша», «мат.логика» — по названию предмета
+                if code:
+                    hits = [r for r in recs if isinstance(r[0], dict) and r[0].get("code") == code]
+            if not hits:
+                return {"error": "not_found", "query": query, "items": self._numbered(ns, recs, ask=True)}
+            refs = [ref for _, _, ref in hits]
+            if all_:
+                if not (pending and pending["ns"] == ns and (not stems or Counter(pending["refs"]) == Counter(refs))):
+                    return {"confirm": True, "count": len(hits), "items": self._numbered(ns, hits, ask=True)}
+                refs = pending["refs"]  # подтвердили: удаляем ровно то, что показали
+            elif len(hits) > 1:
+                return {"choose": True, "items": self._numbered(ns, hits, ask=True)}
+            picked = [(None, ref) for ref in refs]
+        else:
+            return {"choose": True, "items": self._numbered(ns, recs, ask=True)}
+        pool = {}
+        for r in recs:
+            pool.setdefault(r[2], []).append(r)
+        chosen, gone = [], []
+        for n, ref in picked:  # одинаковые заметки — разные номера: берём по одной на номер
+            if pool.get(ref):
+                chosen.append(pool[ref].pop(0))
+            elif n is not None:
+                gone.append(n)
+        if not chosen:
+            return {"error": "already_deleted"}
+        deleted, hidden = drop(chosen)
+        out = {"ok": True}
+        if deleted:
+            out["deleted"] = deleted
+        if hidden:
+            out["hidden"] = hidden
+        if gone:
+            out["gone"] = gone  # эти номера уже удалены раньше
+        return out | {"left": len(again())}
+
+    def _drop(self, kind, chosen):
+        deleted, hidden = [], []
+        own = {"note": self.notes, "reminder": self.reminders, "homework": self.homework, "deadline": self.deadlines,
+               "exam": self.exams}
+        for x, o, ref in chosen:
+            if ref.startswith(("post:", "ev:")):  # рассылка старосты или мероприятие ТПУ: скрываем только у себя
+                if ref not in self.hidden:
+                    self.hidden.append(ref)
+                hidden.append(o)
+            else:
+                own[kind].remove(x)
+                deleted.append(o)
+        return deleted, hidden
+
+    def delete_items(self, kind, numbers=None, query=None, all=None):
+        if kind not in DELETE_KINDS:
+            return {"error": "bad_kind", "kinds": list(DELETE_KINDS)}
+        return self._delete(kind, self._records(kind), numbers, query, all, lambda ch: self._drop(kind, ch),
+                            lambda: self._records(kind))
+
     # ---------- рассылки старосты ----------
     def _posts(self, kind=None):
         """Актуальные рассылки старосты для группы и подгруппы студента (если он вошёл в аккаунт)."""
         if self.store is None or not self.profile.get("group"):
             return []
         posts = self.store.posts(self.profile["group"], self.profile.get("subgroup"), after=self._fmt(self.now), kind=kind)
-        # рассылку с запретной фразой (список могли пополнить уже после неё) студенту не показываем
-        return [p for p in posts if not GUARD.check_obj({k: p.get(k) for k in ("subject", "task", "title", "place", "text")})]
+        # рассылку с запретной фразой (список могли пополнить уже после неё) студенту не показываем, убранную им — тоже
+        return [p for p in posts if f"post:{p['id']}" not in self.hidden and not self._blocked(p)]
+
+    @staticmethod
+    def _blocked(p):
+        return GUARD.check_obj({k: p.get(k) for k in ("subject", "task", "title", "place", "text")})
 
     def starosta_news(self):
         """Всё актуальное от старосты: Д/З, мероприятия на 2 недели вперёд, напоминания на неделю вперёд."""
@@ -671,6 +911,9 @@ class Backend:
         dues = {x["due"] for x in outs} | {r["due"]}
         until = max(d if " " in d else d + " 23:59" for d in dues | {x["due"] for _, x in alls})
         data = {"code": code, "subject": name, "task": task, "due": r["due"], "spec": due}
+        full = self._group_full("homework")
+        if full:
+            return full
         sent = self._post("homework", data, until, subgroup)
         out = {"ok": True, "subject": name, "due": r["due"]}
         if len(dues) > 1:
@@ -713,6 +956,9 @@ class Backend:
             return {"error": "date_in_past"}
         data = {"title": title, "date": d.isoformat()}
         data.update({k: v for k, v in (("time", time), ("place", place)) if v})
+        full = self._group_full("event")
+        if full:
+            return full
         sent = self._post("event", data, f"{d} {time or '23:59'}", subgroup)  # после начала не показываем
         return {"ok": True} | data | {"days_left": left} | sent
 
@@ -731,11 +977,49 @@ class Backend:
             return {"error": "time_required"}
         if fire <= self.now:
             return {"error": "time_in_past"}
+        full = self._group_full("reminder")
+        if full:
+            return full
         sent = self._post("reminder", {"text": text, "fire_at": self._fmt(fire)}, self._fmt(fire), subgroup)
         return {"ok": True, "fire_at": self._fmt(fire)} | sent
 
+    def _group_records(self, kind=None):
+        """Действующие рассылки группе (всем подгруппам) для старосты: [(рассылка, что показать, ссылка)]."""
+        out = []
+        for p in self.store.posts(self.profile["group"], after=self._fmt(self.now), kind=kind):
+            if self._blocked(p):
+                continue
+            o = {} if kind else {"kind": p["kind"]}
+            o.update({k: p[k] for k in POST_SHOW[p["kind"]] if p.get(k)})
+            if p.get("subgroup"):
+                o["subgroup"] = p["subgroup"]
+            out.append((p, o, f"post:{p['id']}"))
+        return out
+
+    def _group_full(self, kind):
+        """Ошибка limit со списком, если у группы уже столько действующих рассылок этого вида, сколько можно."""
+        recs = self._group_records(kind)
+        if len(recs) >= self.group_limits[kind]:
+            return {"error": "limit", "limit": self.group_limits[kind], "items": self._numbered("group:" + kind, recs, ask=True)}
+        return None
+
+    def group_delete_post(self, kind=None, numbers=None, query=None, all=None):
+        err = self._starosta(None)
+        if err:
+            return err
+        if kind is not None and kind not in POST_KINDS:
+            return {"error": "bad_kind", "kinds": list(POST_KINDS)}
+        def drop(chosen):  # из базы: пропадёт у всей группы
+            self.store.delete_posts(self.profile["group"], [p["id"] for p, _, _ in chosen])
+            return [o for _, o, _ in chosen], []
+        return self._delete("group:" + (kind or "all"), self._group_records(kind), numbers, query, all, drop,
+                            lambda: self._group_records(kind))
+
     def call(self, name, args):
+        if name not in DELETE_TOOLS:
+            self.pending = None  # «удалить все» подтверждается только следующим же вызовом удаления
+        before = json.dumps(self._data(), ensure_ascii=False, sort_keys=True)
         res = getattr(self, name)(**args)
-        if name in SAVE_AFTER:
+        if json.dumps(self._data(), ensure_ascii=False, sort_keys=True) != before:  # сохраняем, только если что-то поменялось
             self.save()
         return res

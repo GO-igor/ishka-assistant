@@ -187,10 +187,10 @@ elif a.cmd == "cleanup":
     from backend import prune
     now = dt.datetime.now()
     posts = st.purge_posts(now.strftime("%Y-%m-%d %H:%M"))
-    mine = 0
+    live, mine = st.post_ids(), 0
     for acc in st.accounts():
         data = st.load_data(acc["id"])
-        n = prune(data, now)
+        n = prune(data, now, live)
         if n:
             st.save_data(acc["id"], data)
             mine += n

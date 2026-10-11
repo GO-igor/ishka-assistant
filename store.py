@@ -230,6 +230,20 @@ class Store:
         self.db.commit()
         return n
 
+    def delete_posts(self, group, ids):
+        """Староста отменил рассылки: удалить их у всей группы. Чужие группы не трогаем. Возвращает число удалённых."""
+        ids = [int(i) for i in ids]
+        if not ids:
+            return 0
+        n = self.db.execute(f"DELETE FROM group_posts WHERE grp = ? AND id IN ({', '.join('?' * len(ids))})",
+                            (group_key(group), *ids)).rowcount
+        self.db.commit()
+        return n
+
+    def post_ids(self):
+        """id всех рассылок в базе (чтобы забыть скрытые студентами рассылки, которых уже нет)."""
+        return {r[0] for r in self.db.execute("SELECT id FROM group_posts")}
+
     def posts(self, group, subgroup=None, after=None, kind=None):
         """Рассылки группе, которые ещё актуальны (until >= after), для студента из подгруппы subgroup:
         общие и своей подгруппы; если у студента подгруппа не указана — все."""

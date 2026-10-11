@@ -184,6 +184,47 @@
  {
   "type": "function",
   "function": {
+   "name": "delete_items",
+   "description": "Удалить свои записи (рассылку старосты, мероприятие — скрыть у себя). Без numbers/query/all вернёт список с номерами.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "kind": {
+      "type": "string",
+      "enum": [
+       "note",
+       "reminder",
+       "homework",
+       "deadline",
+       "exam",
+       "event"
+      ]
+     },
+     "numbers": {
+      "type": "array",
+      "items": {
+       "type": "integer"
+      },
+      "description": "номера из показанного списка"
+     },
+     "query": {
+      "type": "string",
+      "description": "слова из записи"
+     },
+     "all": {
+      "type": "boolean",
+      "description": "все; сначала вернёт confirm"
+     }
+    },
+    "required": [
+     "kind"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
    "name": "get_daily_brief",
    "description": "Брифинг на день: пары, переходы, Д/З, дедлайны, экзамены, новости от старосты.",
    "parameters": {
@@ -583,6 +624,42 @@
     "required": [
      "text"
     ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "group_delete_post",
+   "description": "Только староста: отменить рассылку — пропадёт у всей группы. Без numbers/query/all вернёт список с номерами.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "kind": {
+      "type": "string",
+      "enum": [
+       "homework",
+       "event",
+       "reminder"
+      ]
+     },
+     "numbers": {
+      "type": "array",
+      "items": {
+       "type": "integer"
+      },
+      "description": "номера из показанного списка"
+     },
+     "query": {
+      "type": "string",
+      "description": "слова из рассылки"
+     },
+     "all": {
+      "type": "boolean",
+      "description": "все; сначала вернёт confirm"
+     }
+    },
+    "required": []
    }
   }
  }
