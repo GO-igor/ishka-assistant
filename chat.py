@@ -55,6 +55,9 @@ if a.login:
     if a.subgroup or a.english or a.adaptation:
         print("  [профиль берётся из аккаунта: --subgroup, --english и --adaptation не нужны]")
     backend = Backend(now, store.profile(acc), store, acc["id"])
+    if not a.now:  # прошедшее удаляем только по настоящим часам: с --now (проверка) база не трогается
+        backend.cleanup()
+        store.purge_posts(now.strftime("%Y-%m-%d %H:%M"))
     print(f"Привет, {acc['name'] or acc['login']}! Группа {acc['grp']}" + (
         ", ты староста: можешь отправлять группе Д/З, мероприятия и напоминания." if acc["role"] == "starosta" else "."))
 else:

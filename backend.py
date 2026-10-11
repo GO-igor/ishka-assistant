@@ -73,6 +73,22 @@ def walk_minutes(a, b):
     return None
 
 
+def prune(data, now):
+    """Убирает из личных данных то, что уже прошло: Д/З после срока хранения (expires, неделя или до дня после сдачи),
+    сработавшие напоминания, прошедшие дедлайны и экзамены. Заметки без даты не трогаем. Возвращает число удалённых."""
+    today, now_s = now.date().isoformat(), now.strftime("%Y-%m-%d %H:%M")
+    keep = {"homework": lambda h: h.get("expires", "9999") >= today,
+            "reminders": lambda r: r.get("fire_at", "9999") > now_s,
+            "deadlines": lambda x: x.get("due", "9999") >= today,
+            "exams": lambda e: e.get("date", "9999") >= today}
+    removed = 0
+    for k, ok in keep.items():
+        old = data.get(k) or []
+        data[k] = [x for x in old if ok(x)]
+        removed += len(old) - len(data[k])
+    return removed
+
+
 class Backend:
     def __init__(self, now: dt.datetime, profile: dict, store=None, account_id=None):
         # profile: subgroup, english_teacher, adaptation; у вошедших в аккаунт ещё group и role (student|starosta)
@@ -86,6 +102,16 @@ class Backend:
             for k in ("homework", "notes", "reminders", "deadlines", "exams"):
                 setattr(self, k, data.get(k, []))
             self.brief = data.get("brief", self.brief)
+
+    def cleanup(self):
+        """Удалить из своих данных прошедшее (prune) и сохранить. Возвращает число удалённых записей."""
+        data = {k: getattr(self, k) for k in ("homework", "reminders", "deadlines", "exams")}
+        n = prune(data, self.now)
+        if n:
+            for k, v in data.items():
+                setattr(self, k, v)
+            self.save()
+        return n
 
     def save(self):
         if self.store is not None and self.account_id is not None:

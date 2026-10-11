@@ -6,6 +6,7 @@
     python accounts.py edit ivanov --role starosta            # и --group, --subgroup, --english, --name, --adaptation yes|no
     python accounts.py passwd ivanov                          # новый пароль
     python accounts.py remove ivanov
+    python accounts.py cleanup                                # удалить прошедшее (chat.py делает это сам при входе)
 Пароль спрашивается при вводе (не виден на экране); --password ПАРОЛЬ — задать сразу, --generate — придумать случайный.
 Таблица для import (CSV в UTF-8, первая строка — заголовок): login,password,role,group,subgroup,english,name,adaptation
 Разделитель — запятая или точка с запятой. Пустой password — пароль придумается сам; новые пароли допишутся
@@ -44,6 +45,7 @@ p = sub.add_parser("passwd", help="сменить пароль")
 p.add_argument("login")
 p.add_argument("--password")
 p.add_argument("--generate", action="store_true")
+sub.add_parser("cleanup", help="удалить прошедшее: старые рассылки старосты, Д/З, напоминания, дедлайны, экзамены")
 p = sub.add_parser("remove", help="удалить аккаунт")
 p.add_argument("login")
 a = ap.parse_args()
@@ -180,6 +182,19 @@ elif a.cmd == "passwd":
         raise SystemExit(f"Аккаунта «{a.login}» нет")
     st.set_password(a.login, a.password or ask_password(a.generate))
     print("Пароль изменён")
+elif a.cmd == "cleanup":
+    import datetime as dt
+    from backend import prune
+    now = dt.datetime.now()
+    posts = st.purge_posts(now.strftime("%Y-%m-%d %H:%M"))
+    mine = 0
+    for acc in st.accounts():
+        data = st.load_data(acc["id"])
+        n = prune(data, now)
+        if n:
+            st.save_data(acc["id"], data)
+            mine += n
+    print(f"Удалено: рассылок старосты {posts}, личных записей {mine}")
 elif a.cmd == "remove":
     if not st.remove_account(a.login):
         raise SystemExit(f"Аккаунта «{a.login}» нет")

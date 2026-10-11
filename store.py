@@ -224,6 +224,12 @@ class Store:
         self.db.commit()
         return cur.lastrowid
 
+    def purge_posts(self, now):
+        """Удалить рассылки, срок которых прошёл (until раньше now 'YYYY-MM-DD HH:MM'). Возвращает их число."""
+        n = self.db.execute("DELETE FROM group_posts WHERE until < ?", (now,)).rowcount
+        self.db.commit()
+        return n
+
     def posts(self, group, subgroup=None, after=None, kind=None):
         """Рассылки группе, которые ещё актуальны (until >= after), для студента из подгруппы subgroup:
         общие и своей подгруппы; если у студента подгруппа не указана — все."""
