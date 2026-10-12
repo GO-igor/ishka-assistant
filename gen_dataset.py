@@ -3,8 +3,8 @@ python gen_dataset.py  ->  data/train.jsonl, data/eval.jsonl
 Формулировки делятся на train и eval (последние 2 в каждом списке — только eval), чтобы eval проверял обобщение.
 Перед обучением ответы стоит перефразировать большой LLM и выборочно проверить руками."""
 import datetime as dt, json, random, pathlib
-import paraphrase
-from backend import Backend, SUBJECTS, BUILDINGS, WD_RU, WEEKDAYS, HOLIDAYS, EVENT_KINDS
+import paraphrase, prompt_format
+from backend import Backend, SUBJECTS, BUILDINGS, WD_RU, WEEKDAYS, HOLIDAYS, EVENT_KINDS, resolve_subject, _stems
 from store import Store
 
 rnd = random.Random(42)
@@ -1764,9 +1764,27 @@ NF = {"note": "Заметку", "reminder": "Напоминание", "homework"
 POST_Q = {None: "Какую рассылку отменить?", "homework": "Какое Д/З отменить?", "event": "Какое мероприятие отменить?",
           "reminder": "Какое напоминание отменить?"}
 POST_NOUN = ("рассылку", "рассылки", "рассылок")
-GROUP_LIMIT_TXT = {"homework": "активных Д/З", "event": "мероприятий", "reminder": "напоминаний"}
-YES = ["да", "да, удаляй", "ага", "давай", "да, все", "угу, удаляй"]
-NO = ["нет", "не, оставь", "стоп, не надо", "нет, передумал", "не удаляй"]
+GROUP_LIMIT_NOUN = {"homework": ("активное Д/З", "активных Д/З", "активных Д/З"), "event": ("мероприятие", "мероприятия", "мероприятий"),
+                    "reminder": ("напоминание", "напоминания", "напоминаний")}
+ONE_POST = {None: "Сейчас разослана одна рассылка:", "homework": "Сейчас разослано одно Д/З:",
+            "event": "Сейчас разослано одно мероприятие:", "reminder": "Сейчас разослано одно напоминание:"}
+# Ответы студента дальше в диалоге: «да», «нет», номер — общие, остальные формулировки делим на train/eval (split_phr),
+# как и первые сообщения: evaluate.py --step 3 проверяет именно их.
+YES = ["да, удаляй", "ага", "давай", "угу, удаляй", "да, давай", "конечно, удаляй"]
+NO = ["не, оставь", "стоп, не надо", "нет, передумал", "не удаляй", "не надо, пусть будет", "отмена"]
+
+
+def yes(split):
+    return pick(["да", "да"] + split_phr(YES, split))
+
+
+def no(split):
+    return pick(["нет", "нет"] + split_phr(NO, split))
+
+
+def say(split, shared, lst):
+    """Реплика студента: shared — общие для train и eval, из lst eval берёт последние две."""
+    return pick(shared + split_phr(lst, split))
 
 
 def del_line(kind, now, x):
@@ -1871,13 +1889,18 @@ def deleted_answer(kind, res, all_=False):
         out.append(f"Удалил все {len(d)} {plural(len(d), *NOUN[kind])} 🧹")
     elif d:
         out.append(f"Удалил {len(d)} {plural(len(d), *NOUN[kind])}: " + ", ".join(name(kind, x) for x in d) + " 🗑️")
-    if len(h) == 1:
-        out.append(hidden_text(kind, h[0]))
-    elif h:
-        out.append("Рассылки старосты убрал только у тебя — у остальных они остались 👌" if any(x.get("from_starosta") for x in h)
-                   else f"Убрал {len(h)} {plural(len(h), *NOUN[kind])} из твоего списка 👌")
-    if res.get("gone"):
-        out.append("Остальное уже было удалено раньше.")
+    st, mine = [x for x in h if x.get("from_starosta")], [x for x in h if not x.get("from_starosta")]
+    if len(mine) == 1:
+        out.append(hidden_text(kind, mine[0]))
+    elif mine:
+        out.append(f"Убрал {len(mine)} {plural(len(mine), *NOUN[kind])} из твоего списка 👌")
+    if len(st) == 1:
+        out.append(hidden_text(kind, st[0]))
+    elif st:
+        out.append("Рассылки старосты убрал только у тебя — у остальных они остались 👌")
+    g = res.get("gone")
+    if g:
+        out.append(f"Номер {g[0]} уже был удалён раньше." if len(g) == 1 else f"Номера {', '.join(map(str, g))} уже были удалены раньше.")
     if rnd.random() < 0.4:
         out.append(NONE_LEFT[kind] if res["left"] == 0 else f"Осталось: {res['left']}.")
     return " ".join(out)
@@ -1893,20 +1916,23 @@ def gone_phrase(kind, res):
     return f"Удалил {len(d)} {plural(len(d), *NOUN[kind])}: " + ", ".join(name(kind, x) for x in d)
 
 
-def pick_phrase(kind, nums, total):
+def pick_phrase(kind, nums, total, split):
     g = GENDER[kind]
     if len(nums) == 1:
         n = nums[0]
-        opts = [str(n), f"давай {n}", f"номер {n}", f"удали {n}", ORD[g][n - 1], f"{ORD[g][n - 1]} удали"]
-        if n == total and total > 2:
-            opts.append(LAST[g])
-        return pick(opts)
+        opts = [f"давай {n}", f"номер {n}", f"удали {n}", ORD[g][n - 1]] + ([LAST[g]] if n == total and total > 2 else [])
+        return say(split, [str(n), str(n)], opts + [f"{ORD[g][n - 1]} удали", f"убери {n}"])
     a, b = nums
-    return pick([f"{a} и {b}", f"{a}, {b}", f"{ORD[g][a - 1]} и {ORD[g][b - 1]}", f"удали {a} и {b}"])
+    return say(split, [f"{a} и {b}"], [f"{a}, {b}", f"удали {a} и {b}", f"{ORD[g][a - 1]} и {ORD[g][b - 1]}", f"убери {a} и {b}"])
 
 
 def call(b, msgs, name_, args):
-    """Вызов как в chat.py (backend.call): в историю — вызов и результат."""
+    """Вызов как в chat.py (backend.call): в историю — вызов и результат. Новое сообщение студента — new_turn, как в chat.py:
+    номера относятся к спискам из прошлых сообщений, «да» — к списку из предыдущего."""
+    u = max(i for i, m in enumerate(msgs) if m["role"] == "user")
+    if getattr(b, "user_at", None) != u:
+        b.user_at = u
+        b.new_turn()
     res = b.call(name_, args)
     msgs += [tc(name_, args), tr(name_, res)]
     return res
@@ -1926,10 +1952,55 @@ def seed_deadlines(b, k):
 
 
 def del_backend(now, starosta_items=False):
-    """Студент; для рассылок старосты — в аккаунте (group_backend), иначе иногда тоже в аккаунте."""
-    if starosta_items or rnd.random() < 0.3:
-        return group_backend(now, rand_profile(), "student")
-    return Backend(now, rand_profile())
+    """Студент; для рассылок старосты — в аккаунте (group_backend), иначе иногда тоже в аккаунте. Иногда это сам староста
+    со своими записями: их он удаляет delete_items, а group_delete_post — только рассылки группе (их здесь нет)."""
+    r = rnd.random()
+    if starosta_items or r < 0.3:
+        b = group_backend(now, rand_profile(), "student")
+    elif r < 0.42:
+        b = group_backend(now, rand_profile(), "starosta")
+    else:
+        b = Backend(now, rand_profile())
+    b.events = []  # мероприятия здесь только засеянные, не примеры из db/events.json
+    return b
+
+
+def is_head(b):
+    return b.profile.get("role") == "starosta"
+
+
+def would_find(b, kind, query):
+    """Найдёт ли delete_items запись по query (как Backend._delete: слова, потом предмет)."""
+    return would_find_in(b, b._records(kind), query)
+
+
+def would_find_in(b, recs, query):
+    st = _stems(query)
+    if any(b._matches(st, r[0]) for r in recs):
+        return True
+    code = resolve_subject(query)
+    return bool(code) and any(isinstance(r[0], dict) and r[0].get("code") == code for r in recs)
+
+
+def missing_key(kind, b):
+    """Запись, которой у студента нет: (как назовёт, query, about) — для «… не нашёл». None, если не придумалось."""
+    for _ in range(20):
+        if kind == "note":
+            x = cap(pick(NOTES)[0])
+        elif kind == "reminder":
+            x = {"text": cap(pick(list(REM_KEYS)))}
+        elif kind in ("homework", "exam"):
+            code = pick([c for c in SUBJECTS if not c.endswith("_a")])
+            x = {"code": code, "subject": SUBJECTS[code]["name"]}
+        elif kind == "deadline":
+            base = pick(list(DL_DEL))
+            x = {"title": base + (f" {rnd.randint(1, 6)}" if "{n}" in DL_DEL[base][0] else "")}
+        else:
+            x = {"title": pick([t for ts in EV_NAMES.values() for t in ts] + GROUP_EVENTS)}
+        k, query, about = key_of(kind, x)
+        if not would_find(b, kind, query):
+            return k, query, about
+    return None
 
 
 def seed_kind(b, kind, starosta_items=False):
@@ -1990,49 +2061,62 @@ DEL_QUERY_PHR = {
               "{k} — мне не интересно, убери", "убери из списка: {k}", "удали из мероприятий: {k}", "не показывай больше: {k}"]}
 
 
-def finish_choice(kind, now, b, msgs, res, asked_one=False):
-    """После списка (choose / not_found): студент выбирает номер, несколько, «все» или «никакую»."""
+def bad_number_answer(kind, now, res):
+    bad = ", ".join(map(str, res["numbers"]))
+    return pick([f"Номера {bad} в списке нет 🤔 Вот он:\n{del_lines(kind, now, res['items'])}\n\n{CHOOSE_Q[kind]} Напиши номер.",
+                 f"Такого номера нет ({bad}) 🙃 Список:\n{del_lines(kind, now, res['items'])}\n\nКакой номер удалить?"])
+
+
+def finish_choice(kind, now, b, msgs, res, split, asked_one=False):
+    """После списка (choose / not_found): студент выбирает номер, несколько, «все», «никакую» или ошибается номером."""
     items = res["items"]
     nums_all = [x["n"] for x in items]
     r = rnd.random()
     if asked_one:  # «Удалить её?»
         if r < 0.8:
-            msgs.append({"role": "user", "content": pick(YES)})
+            msgs.append({"role": "user", "content": yes(split)})
             res2 = call(b, msgs, "delete_items", {"kind": kind, "numbers": [1]})
             msgs.append({"role": "assistant", "content": deleted_answer(kind, res2)})
         else:
-            msgs += [{"role": "user", "content": pick(NO)}, {"role": "assistant", "content": pick(["Ок, оставил 👌", "Хорошо, не трогаю 🙂"])}]
+            msgs += [{"role": "user", "content": no(split)}, {"role": "assistant", "content": pick(["Ок, оставил 👌", "Хорошо, не трогаю 🙂"])}]
         return msgs
-    if r < 0.6 or (r < 0.78 and len(items) < 2):
+    if r < 0.55 or (r < 0.72 and len(items) < 2):
         nums = [pick(nums_all)]
-    elif r < 0.78:
+    elif r < 0.72:
         nums = sorted(rnd.sample(nums_all, 2))
-    elif r < 0.9:
-        msgs.append({"role": "user", "content": pick(["все", "давай все", "удали все", "все удаляй", "очисти все"])})
+    elif r < 0.84:
+        msgs.append({"role": "user", "content": say(split, ["все"], ["давай все", "удали все", "все удаляй", "очисти все", "удаляй все"])})
         res2 = call(b, msgs, "delete_items", {"kind": kind, "all": True})
         msgs.append({"role": "assistant", "content": deleted_answer(kind, res2, all_=True)})
         return msgs
+    elif r < 0.92:  # опечатка в номере: Ишка показывает список ещё раз, студент называет правильный
+        bad = max(nums_all) + rnd.randint(1, 3)
+        msgs.append({"role": "user", "content": say(split, [str(bad)], [f"удали {bad}", f"давай {bad}", f"номер {bad}", f"убери {bad}"])})
+        res2 = call(b, msgs, "delete_items", {"kind": kind, "numbers": [bad]})
+        msgs.append({"role": "assistant", "content": bad_number_answer(kind, now, res2)})
+        nums = [pick([x["n"] for x in res2["items"]])]
     else:
-        msgs += [{"role": "user", "content": pick([NONE_WORD[GENDER[kind]], "не надо", "передумал", "отмена, ничего не удаляй"])},
+        msgs += [{"role": "user", "content": say(split, [NONE_WORD[GENDER[kind]]], ["не надо", "передумал", "отмена, ничего не удаляй",
+                                                                                     "ничего не удаляй", "пусть остаются"])},
                  {"role": "assistant", "content": pick(["Ок, ничего не удаляю 👌", "Хорошо, всё оставил как есть 🙂"])}]
         return msgs
-    msgs.append({"role": "user", "content": pick_phrase(kind, nums, len(items))})
+    msgs.append({"role": "user", "content": pick_phrase(kind, nums, len(items), split)})
     res2 = call(b, msgs, "delete_items", {"kind": kind, "numbers": nums})
     msgs.append({"role": "assistant", "content": deleted_answer(kind, res2)})
     return msgs
 
 
-def answer_delete(kind, now, b, msgs, res, about):
+def answer_delete(kind, now, b, msgs, res, about, split):
     """Ответ на результат delete_items с query/без: удалено, список на выбор, не найдено, пусто."""
     if res.get("ok"):
         msgs.append({"role": "assistant", "content": deleted_answer(kind, res)})
     elif res.get("choose"):
         msgs.append({"role": "assistant", "content": choose_answer(kind, now, res, about)})
-        finish_choice(kind, now, b, msgs, res, asked_one=len(res["items"]) == 1 and not about)
+        finish_choice(kind, now, b, msgs, res, split, asked_one=len(res["items"]) == 1 and not about)
     elif res.get("error") == "not_found":
         msgs.append({"role": "assistant", "content": not_found_answer(kind, now, res, about)})
         if rnd.random() < 0.6:
-            finish_choice(kind, now, b, msgs, res)
+            finish_choice(kind, now, b, msgs, res, split)
     else:
         assert res.get("error") == "nothing_to_delete", res
         msgs.append({"role": "assistant", "content": EMPTY[kind]})
@@ -2049,17 +2133,17 @@ def cat_del_query(split):
     recs = [r[0] for r in b._records(kind)]
     if st_items:
         recs = [x for x in recs if x.get("from_starosta")] or recs
-    if not recs or (kind == "note" and rnd.random() < 0.12):  # такого нет
-        if kind != "note":
+    if not recs or rnd.random() < 0.12:  # такого нет (или вообще ничего нет)
+        key = missing_key(kind, b)
+        if key is None:
             return None
-        x = cap(pick([n for n in NOTES if cap(n[0]) not in b.notes])[0])
+        k, query, about = key
     else:
-        x = pick(recs)
-    k, query, about = key_of(kind, x)
+        k, query, about = key_of(kind, pick(recs))
     q = pick(split_phr(DEL_QUERY_PHR[kind], split)).format(k=k, q=query)
     msgs = [system(now, b.profile), {"role": "user", "content": q}]
     res = call(b, msgs, "delete_items", {"kind": kind, "query": query})
-    return answer_delete(kind, now, b, msgs, res, about)
+    return answer_delete(kind, now, b, msgs, res, about, split)
 
 
 DEL_CHOOSE_PHR = {
@@ -2088,7 +2172,7 @@ def cat_del_choose(split):
     q = pick(split_phr(DEL_CHOOSE_PHR[kind], split))
     msgs = [system(now, b.profile), {"role": "user", "content": q}]
     res = call(b, msgs, "delete_items", {"kind": kind})
-    return answer_delete(kind, now, b, msgs, res, None)
+    return answer_delete(kind, now, b, msgs, res, None, split)
 
 
 def notes_list_answer(now, res, show):
@@ -2098,18 +2182,21 @@ def notes_list_answer(now, res, show):
 
 
 def cat_del_after_list(split):
-    """Сначала список (заметки и напоминания, Д/З, дедлайны), потом «удали 2», «вторую», «и 4 тоже»."""
+    """Сначала список (заметки и напоминания, Д/З, дедлайны), потом «удали 2», «вторую», «и 4 тоже»; иногда номера
+    нет в списке (Ишка показывает список ещё раз) или номер уже удалён."""
     now = rand_now()
     src = pick(["notes"] * 5 + ["homework"] * 2 + ["deadline"] * 2)
     b = del_backend(now, src == "notes" and rnd.random() < 0.3)
+    ask, both = None, False  # ask — как студент просит удалить n-ю; both — заметки и напоминания показаны вместе
     if src == "notes":
         seeded = rnd.sample(NOTES, rnd.randint(2, 5))
         for x_, _ in seeded:
             b.add_note(cap(x_))
         seed_rems(b, rnd.randint(1, 3))
-        if b.profile.get("group") and rnd.random() < 0.4:
+        if b.profile.get("group") and not is_head(b) and rnd.random() < 0.4:
             seed_posts(b, ("reminder",), 1)
         show = pick(["notes", "notes", "reminders", "both"])
+        both = show == "both"
         q = pick(split_phr({"notes": ["покажи заметки", "мои заметки", "что у меня в заметках", "список заметок",
                                       "открой заметки", "что я записывал в заметки?"],
                             "reminders": ["какие напоминалки стоят?", "покажи напоминания", "мои напоминания",
@@ -2125,22 +2212,25 @@ def cat_del_after_list(split):
         items = res["notes"] if kind == "note" else res["reminders"]
         g = GENDER[kind]
         n = pick([x["n"] for x in items])
-        if show == "both" and rnd.random() < 0.35 and res["notes"] and res["reminders"] \
+        if both and rnd.random() < 0.35 and res["notes"] and res["reminders"] \
                 and n <= min(len(res["notes"]), len(res["reminders"])):  # «удали 2» — а вторых два
-            msgs.append({"role": "user", "content": pick([f"удали {n}", f"{n} удали", f"удали номер {n}"])})
+            msgs.append({"role": "user", "content": say(split, [f"удали {n}"], [f"{n} удали", f"удали номер {n}", f"сотри {n}", f"убери {n}"])})
             xn, xr = res["notes"][n - 1], res["reminders"][n - 1]
             msgs.append({"role": "assistant", "content": f"Заметку {n} («{xn['text']}») или напоминание {n} («{xr['text']}»)?"})
-            msgs.append({"role": "user", "content": pick(["заметку", "заметку, конечно"] if kind == "note" else
-                                                          ["напоминание", "напоминалку"])})
+            msgs.append({"role": "user", "content": say(split, ["заметку"] if kind == "note" else ["напоминание"],
+                                                        ["заметку, конечно", "заметку из заметок", "конечно заметку", "заметку"]
+                                                        if kind == "note" else ["напоминалку", "напоминание, не заметку",
+                                                                                "напоминалку конечно", "напоминание"])})
         else:
             noun = {"note": pick(["заметку", "заметку номер"]), "reminder": pick(["напоминание", "напоминалку"])}[kind]
-            msgs.append({"role": "user", "content": pick([f"удали {noun} {n}", f"{ORD[g][n - 1]} удали", f"удали {ORD[g][n - 1]}",
-                                                          f"{noun} {n} удали"] + ([f"удали {n}"] if show != "both" else []))})
+            ask = say(split, [f"удали {noun} {n}"] + ([] if both else [f"удали {n}"]),
+                      [f"{ORD[g][n - 1]} удали", f"удали {ORD[g][n - 1]}", f"{noun} {n} удали",
+                       f"{noun} {n} больше не нужна" if kind == "note" else f"{noun} {n} больше не нужно", f"сотри {noun} {n}"])
     else:
         kind = src
         if kind == "homework":
             seed_homework(b, rnd.randint(2, 3))
-            if b.profile.get("group") and rnd.random() < 0.4:
+            if b.profile.get("group") and not is_head(b) and rnd.random() < 0.4:
                 seed_posts(b, ("homework",), 1)
             q = pick(split_phr(["что у меня по дз", "покажи всю домашку", "какие дз висят?", "список домашки",
                                 "какие у меня домашки", "напомни все дз"], split))
@@ -2178,17 +2268,39 @@ def cat_del_after_list(split):
             opts.append("первое уже сделал, удали")
         if kind == "deadline":
             opts = [x.replace(ORD[g][n - 1], f"{ORD[g][n - 1]} {word}") for x in opts]
-        msgs.append({"role": "user", "content": pick(opts)})
+        ask = say(split, [], opts + [f"удали {word} номер {n}", f"{word} {n} удали"])
+    if ask is not None:
+        if rnd.random() < 0.08:  # номера больше, чем в списке: Ишка показывает список ещё раз, студент поправляется
+            bad = len(items) + rnd.randint(1, 3)
+            msgs.append({"role": "user", "content": say(split, [f"удали {bad}"], [f"давай {bad}", f"номер {bad}", f"{bad} удали", f"убери {bad}"])})
+            res_bad = call(b, msgs, "delete_items", {"kind": kind, "numbers": [bad]})
+            msgs.append({"role": "assistant", "content": bad_number_answer(kind, now, res_bad)})
+            ask = pick_phrase(kind, [n], len(items), split)
+        msgs.append({"role": "user", "content": ask})
     res2 = call(b, msgs, "delete_items", {"kind": kind, "numbers": [n]})
     msgs.append({"role": "assistant", "content": deleted_answer(kind, res2)})
     left = [m for m in range(1, len(items) + 1) if m != n]
-    if left and rnd.random() < 0.4:  # «и 4 тоже»: номера из того же списка, хотя одну запись уже удалили
+    r = rnd.random()
+    if left and r < 0.4:  # «и 4 тоже»: номера из того же списка, хотя одну запись уже удалили
         m = pick(left)
-        msgs.append({"role": "user", "content": pick([f"и {m} тоже", f"и {ORD[GENDER[kind]][m - 1]} тоже", f"ещё {m} удали"])})
+        msgs.append({"role": "user", "content": say(split, [f"и {m} тоже"], [f"и {ORD[g][m - 1]} тоже", f"ещё {m} удали",
+                                                                              f"и {m} удали", f"а ещё {ORD[g][m - 1]}"])})
         res3 = call(b, msgs, "delete_items", {"kind": kind, "numbers": [m]})
         msgs.append({"role": "assistant", "content": deleted_answer(kind, res3)})
+    elif not both and left and r < 0.5:  # и только что удалённый, и ещё один: удаляем второй, про первый говорим
+        nums = sorted([n, pick(left)])
+        msgs.append({"role": "user", "content": say(split, [f"удали {nums[0]} и {nums[1]}"], [f"{nums[0]} и {nums[1]} удали",
+                                                                                               f"убери {nums[0]} и {nums[1]}"])})
+        res3 = call(b, msgs, "delete_items", {"kind": kind, "numbers": nums})
+        msgs.append({"role": "assistant", "content": deleted_answer(kind, res3)})
+    elif not both and r < 0.58:  # тот же номер ещё раз
+        msgs.append({"role": "user", "content": say(split, [f"удали {n}"], [f"{n} удали", f"номер {n} удали", f"убери {n}"])})
+        res3 = call(b, msgs, "delete_items", {"kind": kind, "numbers": [n]})
+        if res3.get("error") != "already_deleted":  # была ещё одна такая же запись
+            return None
+        msgs.append({"role": "assistant", "content": pick([f"Номер {n} уже удалил 👌 Если надо убрать что-то ещё — назови номер.",
+                                                           f"Это уже удалено 🙂 Номер {n} я убрал только что."])})
     return msgs
-
 
 DEL_ALL_PHR = {
     "note": ["удали все заметки", "очисти заметки", "сотри все заметки", "заметки больше не нужны, удали все",
@@ -2220,15 +2332,16 @@ def cat_del_all(split):
     msgs.append({"role": "assistant", "content": confirm_answer(kind, now, res)})
     r = rnd.random()
     if r < 0.65:
-        msgs.append({"role": "user", "content": pick(YES)})
+        msgs.append({"role": "user", "content": yes(split)})
         res2 = call(b, msgs, "delete_items", {"kind": kind, "all": True})
         msgs.append({"role": "assistant", "content": deleted_answer(kind, res2, all_=True)})
     elif r < 0.85 or res["count"] == 1:
-        msgs += [{"role": "user", "content": pick(NO)},
+        msgs += [{"role": "user", "content": no(split)},
                  {"role": "assistant", "content": pick(["Ок, ничего не удаляю 👌", "Хорошо, всё оставил как есть 🙂", "Отбой, ничего не трогаю 👌"])}]
     else:
         n = pick([x["n"] for x in res["items"]])
-        msgs.append({"role": "user", "content": pick([f"нет, только {ORD[GENDER[kind]][n - 1]}", f"только {n}", f"не все, только {n}"])})
+        msgs.append({"role": "user", "content": say(split, [f"только {n}"], [f"нет, только {ORD[GENDER[kind]][n - 1]}", f"не все, только {n}",
+                                                                              f"нет, только {n}", f"удали только {ORD[GENDER[kind]][n - 1]}"])})
         res2 = call(b, msgs, "delete_items", {"kind": kind, "numbers": [n]})
         msgs.append({"role": "assistant", "content": deleted_answer(kind, res2)})
     return msgs
@@ -2272,15 +2385,15 @@ def cat_del_limit(split):
             f"У тебя уже {res['limit']} напоминаний, больше нельзя 🙃 Какое убрать?\n{lines}\n\n{ask_tail()}"])})
     r = rnd.random()
     if r < 0.15:
-        msgs += [{"role": "user", "content": pick(["не надо", "тогда не записывай", "ладно, забей"])},
+        msgs += [{"role": "user", "content": say(split, ["не надо"], ["тогда не записывай", "ладно, забей", "тогда не надо", "забей"])},
                  {"role": "assistant", "content": pick(["Ок, ничего не трогаю 👌", "Хорошо, оставил всё как есть 🙂"])}]
         return msgs
     if r < 0.27:
-        msgs.append({"role": "user", "content": pick(["все", "удали все старые", "очисти все"])})
+        msgs.append({"role": "user", "content": say(split, ["все"], ["удали все старые", "очисти все", "удаляй все", "старые все удали"])})
         res2 = call(b, msgs, "delete_items", {"kind": kind, "all": True})
     else:
         nums = [pick(range(1, 11))] if r < 0.85 else sorted(rnd.sample(range(1, 11), 2))
-        msgs.append({"role": "user", "content": pick_phrase(kind, nums, 10)})
+        msgs.append({"role": "user", "content": pick_phrase(kind, nums, 10, split)})
         res2 = call(b, msgs, "delete_items", {"kind": kind, "numbers": nums})
     res3 = call(b, msgs, "add_note" if kind == "note" else "create_reminder", args)
     assert res3.get("ok"), res3
@@ -2313,12 +2426,12 @@ def cat_del_student_cancel(split):
         "Отменить рассылку для всей группы может только староста 🙂 Могу убрать её только у тебя — убрать?",
         "Это может сделать только староста: рассылка его. Убрать её у тебя, чтобы не мешала?"])}]
     if rnd.random() < 0.25:
-        msgs += [{"role": "user", "content": pick(["не, не надо", "нет, оставь"])},
+        msgs += [{"role": "user", "content": say(split, ["нет"], ["не, не надо", "нет, оставь", "не, пусть будет", "не надо"])},
                  {"role": "assistant", "content": pick(["Ок, оставил 👌", "Хорошо, пусть остаётся 🙂"])}]
         return msgs
-    msgs.append({"role": "user", "content": pick(["да", "давай", "да, убери у меня", "ага"])})
+    msgs.append({"role": "user", "content": say(split, ["да"], ["давай", "да, убери у меня", "ага", "убери у меня", "давай у меня"])})
     res = call(b, msgs, "delete_items", {"kind": kind, "query": query})
-    return answer_delete(kind, now, b, msgs, res, about)
+    return answer_delete(kind, now, b, msgs, res, about, split)
 
 
 # ---------- староста отменяет рассылки ----------
@@ -2367,18 +2480,51 @@ def post_key(x):
     return f"напоминание про {k}", query, "reminder"
 
 
+NOT_POSTED = {"homework": "Д/З группе сейчас не разослано — отменять нечего 🙂",
+              "event": "Мероприятий группе сейчас не разослано — отменять нечего 🙂",
+              "reminder": "Напоминаний группе сейчас не разослано — отменять нечего 🙂"}
+
+
+def missing_post(b, recs):
+    """Рассылка, которой нет: староста называет то, чего не рассылал. -> (запись как у рассылки) или None."""
+    for _ in range(20):
+        kind = pick(["homework", "event", "reminder"])
+        if kind == "homework":
+            code = pick([c for c in SUBJECTS if not c.endswith("_a")])
+            x = {"kind": kind, "code": code, "subject": SUBJECTS[code]["name"]}
+        elif kind == "event":
+            x = {"kind": kind, "title": pick([t for ts in EV_NAMES.values() for t in ts] + GROUP_EVENTS)}
+        else:
+            x = {"kind": kind, "text": cap(pick(list(GROUP_REM_KEYS)))}
+        _, query, _ = post_key(x)
+        if not would_find_in(b, recs, query):  # и среди рассылок других видов: без kind ищет по всем
+            return x
+    return None
+
+
+def post_reply(split, nums):
+    if len(nums) == 1:
+        n = nums[0]
+        return say(split, [str(n), str(n)], [f"давай {n}", f"номер {n}", f"отмени {n}", f"{n}, отменяй"])
+    j = " и ".join(map(str, nums))
+    return say(split, [j], [", ".join(map(str, nums)), "давай " + j, "отмени " + j, j + ", отменяй"])
+
+
 def cat_group_delete(split):
-    """Староста отменяет рассылку: пропадёт у всей группы."""
+    """Староста отменяет рассылку: пропадёт у всей группы. Иногда такой рассылки нет или этого вида не рассылал вообще."""
     now = rand_now()
     b = group_backend(now, rand_profile(), "starosta")
-    seed_posts(b, k=rnd.randint(2, 5))
+    seed_posts(b, k=rnd.randint(2, 4))
     recs = b._group_records()
     if not recs:
         return None
     msgs = [system(now, b.profile)]
     form = pick(["query", "query", "query", "choose", "choose", "kind_choose", "all"])
     if form == "query":
-        x = pick(recs)[0]
+        miss = rnd.random() < 0.12
+        x = missing_post(b, recs) if miss else pick(recs)[0]
+        if x is None:
+            return None
         k, query, kind = post_key(x)
         named = kind == "homework" or rnd.random() < 0.6  # «отмени дз по матану» — вид назван; «рассылку про собрание» — нет
         if named and kind == "event":
@@ -2401,31 +2547,48 @@ def cat_group_delete(split):
         if res.get("ok"):
             msgs.append({"role": "assistant", "content": group_deleted_answer(res, args.get("kind"))})
             return msgs
-        assert res.get("choose"), res
-        msgs.append({"role": "assistant", "content": f"Нашёл {len(res['items'])} {plural(len(res['items']), *POST_NOUN)}:\n"
-                                                     f"{post_lines(now, res['items'], args.get('kind'))}\n\n{POST_Q[args.get('kind')]} Напиши номер."})
+        if res.get("error") == "nothing_to_delete":
+            msgs.append({"role": "assistant", "content": NOT_POSTED[kind]})
+            return msgs
+        if res.get("error") == "not_found":
+            about = (f"Д/З {k.removeprefix('дз ')}" if kind == "homework" else
+                     f"Мероприятие {quoted(x['title'])}" if kind == "event" else cap(k))
+            msgs.append({"role": "assistant", "content": f"{about} в рассылках не нашёл 🤔 Сейчас разослано:\n"
+                                                         f"{post_lines(now, res['items'], args.get('kind'))}\n\n"
+                                                         f"{POST_Q[args.get('kind')]} Напиши номер."})
+            if rnd.random() < 0.4:
+                msgs += [{"role": "user", "content": say(split, ["никакое"], ["тогда ничего", "ничего не отменяй", "не надо",
+                                                                                "значит, не надо"])},
+                         {"role": "assistant", "content": pick(["Ок, ничего не отменяю 👌", "Хорошо, рассылки остаются 🙂"])}]
+                return msgs
+        else:
+            assert res.get("choose"), res
+            msgs.append({"role": "assistant", "content": f"Нашёл {len(res['items'])} {plural(len(res['items']), *POST_NOUN)}:\n"
+                                                         f"{post_lines(now, res['items'], args.get('kind'))}\n\n{POST_Q[args.get('kind')]} Напиши номер."})
         n = pick([y["n"] for y in res["items"]])
-        msgs.append({"role": "user", "content": pick([str(n), f"давай {n}", f"номер {n}"])})
+        msgs.append({"role": "user", "content": post_reply(split, [n])})
         res2 = call(b, msgs, "group_delete_post", {k_: v for k_, v in args.items() if k_ != "query"} | {"numbers": [n]})
         msgs.append({"role": "assistant", "content": group_deleted_answer(res2, args.get("kind"))})
         return msgs
     kind = None
     if form == "kind_choose":
-        kind = pick(sorted({r[0]["kind"] for r in recs}))
+        have = sorted({r[0]["kind"] for r in recs})
+        kind = pick([k_ for k_ in ("homework", "event", "reminder") if k_ not in have] or have) if rnd.random() < 0.1 else pick(have)
     if form == "all":
         q = pick(split_phr(["отмени все рассылки", "удали все рассылки группе", "отзови всё, что разослал", "очисти рассылки",
                             "отмени всё, что я разослал", "удали все мои рассылки"], split))
         msgs.append({"role": "user", "content": q})
         res = call(b, msgs, "group_delete_post", {"all": True})
         n = res["count"]
-        msgs.append({"role": "assistant", "content": f"Точно отменить все {n} {plural(n, *POST_NOUN)}? Они пропадут у всей группы:\n"
-                                                     f"{post_lines(now, res['items'])}\n\nНапиши «да» — отменю."})
+        head = (f"Точно отменить все {n} {plural(n, *POST_NOUN)}? Они пропадут у всей группы:" if n > 1
+                else "Сейчас разослана одна рассылка. Отменить её? Она пропадёт у всей группы:")
+        msgs.append({"role": "assistant", "content": f"{head}\n{post_lines(now, res['items'])}\n\nНапиши «да» — отменю."})
         if rnd.random() < 0.75:
-            msgs.append({"role": "user", "content": pick(YES)})
+            msgs.append({"role": "user", "content": say(split, ["да", "да"], ["да, отменяй", "ага", "давай", "отменяй все", "да, отменяй всё"])})
             res2 = call(b, msgs, "group_delete_post", {"all": True})
             msgs.append({"role": "assistant", "content": group_deleted_answer(res2)})
         else:
-            msgs += [{"role": "user", "content": pick(NO)},
+            msgs += [{"role": "user", "content": no(split)},
                      {"role": "assistant", "content": pick(["Ок, ничего не отменяю 👌", "Хорошо, рассылки остаются 🙂"])}]
         return msgs
     q = pick(split_phr({None: ["хочу отменить рассылку", "отмени одну рассылку", "что я разослал? хочу отменить лишнее",
@@ -2439,29 +2602,42 @@ def cat_group_delete(split):
     args = {"kind": kind} if kind else {}
     msgs.append({"role": "user", "content": q})
     res = call(b, msgs, "group_delete_post", args)
+    if res.get("error") == "nothing_to_delete":
+        msgs.append({"role": "assistant", "content": NOT_POSTED[kind]})
+        return msgs
     items = res["items"]
     if len(items) == 1:
-        msgs.append({"role": "assistant", "content": f"Сейчас разослана одна рассылка:\n{post_lines(now, items, kind)}\n\nОтменить? Пропадёт у всей группы."})
-        msgs.append({"role": "user", "content": pick(YES)})
+        msgs.append({"role": "assistant", "content": f"{ONE_POST[kind]}\n{post_lines(now, items, kind)}\n\nОтменить? Пропадёт у всей группы."})
+        msgs.append({"role": "user", "content": say(split, ["да", "да"], ["да, отменяй", "ага", "давай", "отменяй", "да, отмени"])})
         res2 = call(b, msgs, "group_delete_post", args | {"numbers": [1]})
     else:
         msgs.append({"role": "assistant", "content": f"{POST_Q[kind]} 📢\n{post_lines(now, items, kind)}\n\n"
                                                      "Напиши номер (можно несколько) — пропадёт у всей группы."})
         nums = [pick([y["n"] for y in items])] if rnd.random() < 0.8 else sorted(rnd.sample([y["n"] for y in items], 2))
-        msgs.append({"role": "user", "content": pick([", ".join(map(str, nums)), " и ".join(map(str, nums)), "давай " + " и ".join(map(str, nums))])})
+        msgs.append({"role": "user", "content": post_reply(split, nums)})
         res2 = call(b, msgs, "group_delete_post", args | {"numbers": nums})
     msgs.append({"role": "assistant", "content": group_deleted_answer(res2, kind)})
     return msgs
 
-
 def cat_group_limit(split):
     """У группы уже максимум рассылок этого вида: староста отменяет старую — и новая уходит."""
+    kind = pick(["homework", "event", "reminder"])
+    # Длинный диалог (не влез в MAX_TOKENS) собираем заново с тем же видом рассылки: иначе фильтр длины
+    # оставил бы почти одни напоминания — мероприятия и Д/З в списке длиннее.
+    for _ in range(40):
+        m = group_limit_dialog(split, kind)
+        if m is None or est_tokens(m) <= MAX_TOKENS:
+            return m
+    return None
+
+
+def group_limit_dialog(split, kind):
     now = rand_now((7, 20))
     b = group_backend(now, rand_profile(), "starosta")
-    kind = pick(["homework", "event", "reminder"])
-    # в бэкенде лимит 10, но список из 10 рассылок с промптом старосты не влезает в 4096 токенов обучения:
-    # здесь лимит 3 — модель учится тому же (показать список, отменить выбранное, разослать новое)
-    b.group_limits = {k: 3 for k in b.group_limits}
+    # в бэкенде лимит 10, но список из 10 рассылок с промптом старосты (24 инструмента) не влезает в 4096 токенов
+    # обучения, из 3 мероприятий — тоже: здесь лимит 2, модель учится тому же (показать список, отменить выбранное,
+    # разослать новое)
+    b.group_limits = {k: 2 for k in b.group_limits}
     for _ in range(40):
         if len(b._group_records(kind)) >= b.group_limits[kind]:
             break
@@ -2492,15 +2668,16 @@ def cat_group_limit(split):
     res = call(b, msgs, name_, args)
     if res.get("error") != "limit":
         return None
-    msgs.append({"role": "assistant", "content": f"У группы уже {res['limit']} {GROUP_LIMIT_TXT[kind]} — больше нельзя 📢 "
+    msgs.append({"role": "assistant", "content": f"У группы уже {res['limit']} {plural(res['limit'], *GROUP_LIMIT_NOUN[kind])} — больше нельзя 📢 "
                                                  f"Отменить какое-нибудь из старых?\n{post_lines(now, res['items'], kind)}\n\n"
                                                  "Напиши номер — отменю его и разошлю новое."})
     if rnd.random() < 0.15:
-        msgs += [{"role": "user", "content": pick(["не надо", "тогда не рассылай"])},
+        msgs += [{"role": "user", "content": say(split, ["не надо"], ["тогда не рассылай", "ладно, не рассылай", "тогда не надо",
+                                                                        "оставь как есть"])},
                  {"role": "assistant", "content": "Ок, ничего не отменяю и не рассылаю 👌"}]
         return msgs
     n = pick([y["n"] for y in res["items"]])
-    msgs.append({"role": "user", "content": pick([str(n), f"давай {n}", f"отмени {n}", f"номер {n}"])})
+    msgs.append({"role": "user", "content": post_reply(split, [n])})
     res2 = call(b, msgs, "group_delete_post", {"kind": kind, "numbers": [n]})
     res3 = call(b, msgs, name_, args)
     if not res3.get("ok"):
@@ -2516,8 +2693,33 @@ def cat_group_limit(split):
     return msgs
 
 
-DELETE_CATS = [(cat_del_query, 60), (cat_del_choose, 40), (cat_del_after_list, 35), (cat_del_all, 25), (cat_del_limit, 16),
-               (cat_del_student_cancel, 8), (cat_group_delete, 30), (cat_group_limit, 8)]
+MAX_TOKENS = 4050  # обучение режет после 4096 токенов
+
+
+def est_tokens(m):
+    """Длина диалога в токенах без токенизатора: описание инструментов — 3,2 символа на токен (у Qwen3 ровно 3,22),
+    всё остальное — 2,2. Проверено токенизатором Qwen3 на всём датасете и 5700 диалогах удаления: оценка
+    не меньше настоящей длины (больше на 5–375 токенов)."""
+    full = len(prompt_format.render(m))
+    rest = len(prompt_format.render(m, []))  # без блока инструментов
+    return (full - rest) / 3.2 + rest / 2.2
+
+
+def fits(cat):
+    """Диалог длиннее MAX_TOKENS не берём (при обучении обрезался бы конец — сам ответ), а собираем заново
+    той же категорией: так доля категорий не сдвигается."""
+    def f(split):
+        for _ in range(40):
+            m = cat(split)
+            if m is None or est_tokens(m) <= MAX_TOKENS:
+                return m
+        return None
+    f.__name__ = cat.__name__
+    return f
+
+
+DELETE_CATS = [(fits(c), w) for c, w in [(cat_del_query, 60), (cat_del_choose, 40), (cat_del_after_list, 35), (cat_del_all, 25),
+                                         (cat_del_limit, 16), (cat_del_student_cancel, 8), (cat_group_delete, 30), (cat_group_limit, 8)]]
 
 
 # Только train: после первого обучения модель вызывала инструмент даже на «привет» (ответов текстом было 6%)

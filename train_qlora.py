@@ -89,7 +89,7 @@ trainer = SFTTrainer(
     train_dataset=ds["train"], eval_dataset=ds["eval"],
     args=SFTConfig(
         dataset_text_field="text", max_length=MAX_LEN,
-        per_device_train_batch_size=HP["batch"], gradient_accumulation_steps=HP["accum"],  # пример ~2400 токенов, batch 2 не влезает в T4
+        per_device_train_batch_size=HP["batch"], gradient_accumulation_steps=HP["accum"],  # пример ~2800 токенов, batch 2 не влезает в T4
         per_device_eval_batch_size=1,
         num_train_epochs=HP["epochs"], learning_rate=HP["lr"], lr_scheduler_type=HP["scheduler"], warmup_steps=HP["warmup"],
         logging_steps=5, eval_strategy="steps", eval_steps=40, save_steps=10, save_total_limit=2,

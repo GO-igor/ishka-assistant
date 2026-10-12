@@ -29,7 +29,7 @@ DELETE_TOOLS = {"delete_items", "group_delete_post"}
 TEXT_KEYS = ("text", "subject", "task", "title", "place", "kind")  # где искать слова из query при удалении
 POST_SHOW = {"homework": ("subject", "task", "due"), "event": ("title", "date", "time", "place"), "reminder": ("text", "fire_at")}
 OWN_KEYS = {"reminder": ("text", "fire_at"), "homework": ("subject", "task", "due"), "deadline": ("title", "subject", "due"),
-            "exam": ("subject", "kind", "date")}  # по этим полям своя запись узнаётся после удаления соседних
+            "exam": ("subject", "kind")}  # по этим полям своя запись узнаётся после удаления соседних (экзамен — и после переноса)
 STOP = {"по", "в", "во", "на", "с", "со", "к", "ко", "и", "о", "об", "про", "для", "от", "до", "за", "из", "у", "мою",
         "мой", "мое", "моё", "мои", "мне", "все", "всё"}  # предлоги и местоимения в query не мешают поиску
 MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
@@ -97,7 +97,7 @@ def _stem(w):
 
 def _stems(query):
     """Основы слов запроса: «вайфай» находит «вайфая», «староста» — «старосты». Предлоги («про», «по») не считаем."""
-    return [_stem(w) for w in _words(query) if w not in STOP]
+    return [w if w.isdigit() else _stem(w) for w in _words(query) if w not in STOP]  # числа — целиком: «45123» не «4512»
 
 
 def _hit(stems, text):
@@ -164,15 +164,17 @@ class Backend:
         self.brief = {"enabled": True, "time": "07:30"}
         self.events = EVENTS
         # Состояние разговора, в базу не пишется: какой список с номерами показан последним (номера в delete_items
-        # относятся к нему) и что ждёт подтверждения «удалить все». Сайту нужен один Backend на разговор
-        # (или хранить shown и pending вместе с историей сообщений).
-        self.shown, self.pending = {}, None
+        # относятся к нему), что ждёт подтверждения «удалить все» и номер сообщения студента (new_turn). Сайту нужен
+        # один Backend на разговор или снимок conversation(), сохранённый вместе с историей (restore).
+        self.shown, self.pending, self.turn = {}, {}, None
         self.limits, self.group_limits = dict(LIMITS), dict(GROUP_LIMITS)  # можно поменять для одного Backend
         if store is not None and account_id is not None:
             data = store.load_data(account_id)
             for k in ("homework", "notes", "reminders", "deadlines", "exams", "hidden"):
                 setattr(self, k, data.get(k, []))
             self.brief = data.get("brief", self.brief)
+        # записано до лимитов больше, чем можно: старое не обрезаем, предел — сколько было (удалил одну — запишешь новую)
+        self.had = {"note": len(self.notes), "reminder": sum(1 for r in self.reminders if r.get("fire_at", "") > self._fmt(now))}
 
     def cleanup(self):
         """Удалить из своих данных прошедшее (prune) и сохранить. Возвращает число удалённых записей."""
@@ -538,13 +540,15 @@ class Backend:
         if fire <= self.now:
             return {"error": "time_in_past"}
         own = [r for r in self._records("reminder") if not r[0].get("from_starosta")]
-        if len(own) >= self.limits["reminder"]:  # напоминания старосты не в счёт: их лимит у старосты
+        if len(own) >= max(self.limits["reminder"], self.had["reminder"]):  # напоминания старосты не в счёт: их лимит у старосты
             return {"error": "limit", "limit": self.limits["reminder"], "items": self._numbered("reminder", own, ask=True)}
         self.reminders.append({"text": text, "fire_at": self._fmt(fire)})
         return {"ok": True, "fire_at": self._fmt(fire)}
 
     def add_note(self, text):
-        if len(self.notes) >= self.limits["note"]:
+        if not isinstance(text, str) or not text.strip():
+            return {"error": "empty_text"}
+        if len(self.notes) >= max(self.limits["note"], self.had["note"]):
             return {"error": "limit", "limit": self.limits["note"], "items": self._numbered("note", self._records("note"), ask=True)}
         self.notes.append(text)
         return {"ok": True, "id": len(self.notes)}
@@ -712,6 +716,29 @@ class Backend:
     # («удали 2») номера остальных не сдвигаются («и 4 тоже» — та же четвёртая). Списка ещё не было — номера не угадываем,
     # а показываем список. «Удалить все» — только после показанного списка: сначала подтверждение (confirm), удаляем
     # следующим же вызовом. Рассылки старосты и мероприятия ТПУ студент не удаляет, а скрывает у себя (hidden).
+    # Если чат сообщает о каждом сообщении студента (new_turn), номера относятся только к спискам из прошлых сообщений,
+    # а «да» подтверждает только список из предыдущего: модель не подтвердит удаление сама себе вторым вызовом.
+    def new_turn(self):
+        """Пришло новое сообщение студента: chat.py и сайт вызывают это перед ответом модели."""
+        self.turn = (self.turn or 0) + 1
+
+    def conversation(self):
+        """Снимок разговора: какие списки с номерами показаны и что ждёт «да». Если ход не удался и убран из истории,
+        chat.py возвращает снимок (restore): студент тех списков не видел. Сайт может хранить его вместе с историей."""
+        return {"shown": dict(self.shown), "pending": dict(self.pending), "turn": self.turn}
+
+    def restore(self, state):
+        self.shown, self.pending, self.turn = dict(state["shown"]), dict(state["pending"]), state["turn"]
+
+    def _seen(self, entry, previous=False):
+        """Список (из shown или pending) студент уже видел: показан в одном из прошлых сообщений, previous=True —
+        ровно в предыдущем. Без new_turn (генератор датасета, тесты) сообщения не считаем."""
+        if entry is None:
+            return False
+        if self.turn is None or entry.get("turn") is None:
+            return True
+        return entry["turn"] == self.turn - 1 if previous else entry["turn"] < self.turn
+
     def _ref(self, kind, x):
         if kind == "note":
             return json.dumps(["note", x], ensure_ascii=False)
@@ -735,22 +762,34 @@ class Backend:
         return [(x, o, self._ref(kind, x)) for x, o in items]
 
     def _remember(self, kind, items):
-        self.shown[kind] = [self._ref(kind, x) for x, _ in items]
+        self.shown[kind] = {"refs": [self._ref(kind, x) for x, _ in items], "turn": self.turn}
 
-    def _numbered(self, ns, recs, ask=False):
+    def _numbered(self, ns, recs, ask=False, part=False):
         """Список с номерами n. Запоминаем его: номера в следующем удалении значат то же самое.
-        ask=True — список показан, чтобы выбрать, что удалить: ответ «все» на него удаляет весь список без переспроса."""
-        self.shown[ns] = [ref for _, _, ref in recs]
+        ask=True — список показан, чтобы выбрать, что удалить: ответ «все» на него удаляет весь этот список.
+        part=True — это подтверждение «удалить все про X»: просто «все» его не подтверждает (это уже про все записи)."""
+        refs = [ref for _, _, ref in recs]
+        self.shown[ns] = {"refs": refs, "turn": self.turn}
         if ask:
-            self.pending = {"ns": ns, "refs": list(self.shown[ns])}
+            self.pending[ns] = {"refs": list(refs), "turn": self.turn, "part": part}
         return [{"n": i} | o for i, (_, o, _) in enumerate(recs, 1)]
+
+    @staticmethod
+    def _still(refs, recs):
+        """Какие номера списка refs ещё есть среди recs: [(номер, ссылка)] (одинаковые заметки считаем поштучно)."""
+        left, out = Counter(ref for _, _, ref in recs), []
+        for i, ref in enumerate(refs, 1):
+            if left[ref] > 0:
+                left[ref] -= 1
+                out.append((i, ref))
+        return out
 
     @staticmethod
     def _matches(stems, x):
         """Подходит ли запись под слова запроса. Предмет узнаём и по сокращениям («удали дз по питону» — а в записи
         «Основы программирования на Python»); число («лаба 3») — только целиком и не из названия предмета («1.3»)."""
-        if isinstance(x, str):
-            main, subj = x, ""
+        if not isinstance(x, dict):
+            main, subj = str(x), ""
         else:
             code = x.get("code") if x.get("code") in SUBJECTS else None
             main = " ".join(str(x.get(k) or "") for k in TEXT_KEYS if not (k == "subject" and code))
@@ -761,34 +800,44 @@ class Backend:
     def _delete(self, ns, recs, numbers, query, all_, drop, again):
         """Общая часть delete_items и group_delete_post. recs — что можно удалить сейчас, drop(выбранное) удаляет
         и возвращает (удалено, скрыто), again() — список после удаления."""
-        pending, self.pending = self.pending, None
+        pending = self.pending.pop(ns, None)
+        if not self._seen(pending, previous=True):
+            pending = None  # «да» подтверждает только список из прошлого сообщения
         all_ = all_ is True or str(all_).strip().lower() in ("true", "1", "yes", "да")
         stems = _stems(query) if isinstance(query, str) else []
         if not recs:
             return {"error": "nothing_to_delete"}
-        if numbers not in (None, "", []):
-            nums, shown = _nums(numbers), self.shown.get(ns)
-            if shown is None:  # список ещё не показывали: какую запись студент считает второй, не знаем
+        shown, by_number = self.shown.get(ns), numbers not in (None, "", [])
+        if by_number:
+            nums = _nums(numbers)
+            if not self._seen(shown):  # список ещё не показывали: какую запись студент считает второй, не знаем
                 return {"choose": True, "items": self._numbered(ns, recs, ask=True)}
-            bad = [n for n in nums if not 1 <= n <= len(shown)] if nums else [numbers]
-            if bad:
-                return {"error": "bad_number", "numbers": bad, "items": self._numbered(ns, recs, ask=True)}
-            picked = [(n, shown[n - 1]) for n in nums]
+            refs = shown["refs"]
+            bad = [n for n in nums if not 1 <= n <= len(refs)] if nums else [numbers]
+            if bad:  # номера остальных не меняем: студент поправит опечатку по тому же списку
+                still = self._still(refs, recs)
+                if not still:
+                    return {"error": "bad_number", "numbers": bad, "items": self._numbered(ns, recs, ask=True)}
+                shows = {ref: o for _, o, ref in recs}
+                self.pending[ns] = {"refs": [ref for _, ref in still], "turn": self.turn, "part": False}
+                return {"error": "bad_number", "numbers": bad, "items": [{"n": i} | shows[ref] for i, ref in still]}
+            picked = [(n, refs[n - 1]) for n in nums]
         elif stems or all_:
-            hits = recs
+            hits, guessed = recs, False
             if stems:
                 hits = [r for r in recs if self._matches(stems, r[0])]
                 code = None if hits else resolve_subject(query)  # «матеша», «мат.логика» — по названию предмета
                 if code:
                     hits = [r for r in recs if isinstance(r[0], dict) and r[0].get("code") == code]
+                    guessed = True  # совпал только предмет, остальные слова — нет: сами не удаляем, спрашиваем
             if not hits:
                 return {"error": "not_found", "query": query, "items": self._numbered(ns, recs, ask=True)}
             refs = [ref for _, _, ref in hits]
             if all_:
-                if not (pending and pending["ns"] == ns and (not stems or Counter(pending["refs"]) == Counter(refs))):
-                    return {"confirm": True, "count": len(hits), "items": self._numbered(ns, hits, ask=True)}
+                if not (pending and ((not stems and not pending["part"]) or Counter(pending["refs"]) == Counter(refs))):
+                    return {"confirm": True, "count": len(hits), "items": self._numbered(ns, hits, ask=True, part=bool(stems))}
                 refs = pending["refs"]  # подтвердили: удаляем ровно то, что показали
-            elif len(hits) > 1:
+            elif len(hits) > 1 or guessed:
                 return {"choose": True, "items": self._numbered(ns, hits, ask=True)}
             picked = [(None, ref) for ref in refs]
         else:
@@ -812,7 +861,9 @@ class Backend:
             out["hidden"] = hidden
         if gone:
             out["gone"] = gone  # эти номера уже удалены раньше
-        return out | {"left": len(again())}
+        after = again()
+        # сколько осталось: по номеру — в том списке, который видел студент (мероприятий могли показать не все), иначе всего
+        return out | {"left": len(self._still(shown["refs"], after)) if by_number else len(after)}
 
     def _drop(self, kind, chosen):
         deleted, hidden = [], []
@@ -1017,7 +1068,7 @@ class Backend:
 
     def call(self, name, args):
         if name not in DELETE_TOOLS:
-            self.pending = None  # «удалить все» подтверждается только следующим же вызовом удаления
+            self.pending = {}  # «удалить все» подтверждается только следующим же вызовом удаления
         before = json.dumps(self._data(), ensure_ascii=False, sort_keys=True)
         res = getattr(self, name)(**args)
         if json.dumps(self._data(), ensure_ascii=False, sort_keys=True) != before:  # сохраняем, только если что-то поменялось

@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     created TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS group_posts (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,   -- id удалённой рассылки не достанется новой (студенты скрывают по id)
     author_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
     grp TEXT NOT NULL,
     subgroup INTEGER,                       -- NULL — всей группе
@@ -99,7 +99,27 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
+        self._autoincrement()
         self._normalize()
+
+    def _autoincrement(self):
+        """База до 12.10.2026: id рассылок без AUTOINCREMENT, и новая рассылка получала id только что удалённой.
+        Студент, скрывший у себя старую (hidden: post:id), не увидел бы новую. Переделываем таблицу, данные те же."""
+        sql = self.db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'group_posts'").fetchone()[0]
+        if "AUTOINCREMENT" in sql.upper():
+            return
+        table = SCHEMA[SCHEMA.index("CREATE TABLE IF NOT EXISTS group_posts"):SCHEMA.index("CREATE INDEX")]
+        self.db.execute("BEGIN")
+        try:
+            self.db.execute("ALTER TABLE group_posts RENAME TO group_posts_old")
+            self.db.execute(table)
+            self.db.execute("INSERT INTO group_posts SELECT * FROM group_posts_old")
+            self.db.execute("DROP TABLE group_posts_old")
+            self.db.execute("CREATE INDEX IF NOT EXISTS group_posts_grp ON group_posts (grp, until)")
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
 
     def _normalize(self):
         """База от первой версии: логины и группы хранились как введены (Петров, 8к51) — приводим к login_key/group_key."""

@@ -9,6 +9,7 @@
 import argparse, collections, json, re, sys
 from unsloth import FastLanguageModel
 from prompt_format import CALL_THRESHOLD, answer_prefix, answer_text, parse_call, prompt_diff, tools_for  # как в chat.py
+from backend import _nums, _stems  # номера и слова для delete_items — как их понимает бэкенд
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--model", default="out/lora")
@@ -70,13 +71,26 @@ FREE = {"text", "task", "title"}  # свободный текст: «Купит�
 words = lambda v: re.sub(r"[^\w]+", " ", norm(v).replace("ё", "е")).strip()
 
 
+def clean(args):
+    """Пустой необязательный аргумент (null, "", []) и all: false — всё равно что его нет."""
+    return {k: v for k, v in args.items() if not (v is None or v == "" or v == [] or (k == "all" and v is False))}
+
+
 def same_args(ga, pa):
+    ga, pa = clean(ga), clean(pa)
     if set(ga) != set(pa):
         return False
     for k, v in ga.items():
         if k in FREE:
             g, p = words(v), words(pa[k])
             if not (g == p or (g and p and (g in p or p in g))):
+                return False
+        elif k == "query":  # «пароли» и «пароль», «пароль от почты» и «пароль»: бэкенд ищет по основам слов
+            g, p = set(_stems(str(v))), set(_stems(str(pa[k])))
+            if not (g == p or (g and p and (g <= p or p <= g))):
+                return False
+        elif k == "numbers":  # [4, 2] и [2, 4], "2" и [2] — одно и то же
+            if _nums(pa[k]) is None or sorted(_nums(v) or []) != sorted(_nums(pa[k])):
                 return False
         elif norm(v) != norm(pa[k]):
             return False
