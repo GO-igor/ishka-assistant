@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     created TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS group_posts (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,   -- id удалённой рассылки не достанется новой (студенты скрывают по id)
     author_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
     grp TEXT NOT NULL,
     subgroup INTEGER,                       -- NULL — всей группе
@@ -99,7 +99,38 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
+        self._autoincrement()
         self._normalize()
+
+    def _autoincrement(self):
+        """База до 12.10.2026: id рассылок без AUTOINCREMENT, и новая рассылка получала id только что удалённой.
+        Студент, скрывший у себя старую (hidden: post:id), не увидел бы новую. Переделываем таблицу, данные те же."""
+        sql = self.db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'group_posts'").fetchone()[0]
+        if "AUTOINCREMENT" in sql.upper():
+            return
+        table = SCHEMA[SCHEMA.index("CREATE TABLE IF NOT EXISTS group_posts"):SCHEMA.index("CREATE INDEX")]
+        # без проверки ссылок: рассылка удалённого вручную аккаунта не должна мешать переносу (так советует SQLite)
+        self.db.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.db.execute("BEGIN")
+            try:
+                self.db.execute("ALTER TABLE group_posts RENAME TO group_posts_old")
+                self.db.execute(table)
+                self.db.execute("INSERT INTO group_posts SELECT * FROM group_posts_old")
+                self.db.execute("DROP TABLE group_posts_old")
+                self.db.execute("CREATE INDEX IF NOT EXISTS group_posts_grp ON group_posts (grp, until)")
+                self.db.execute("COMMIT")
+            except sqlite3.OperationalError as e:
+                if self.db.in_transaction:
+                    self.db.execute("ROLLBACK")
+                if "readonly" in str(e) or "locked" in str(e):
+                    return  # базу только читают (или её держит другой процесс): перенесём при следующем запуске
+                raise
+            except Exception:
+                self.db.execute("ROLLBACK")
+                raise
+        finally:
+            self.db.execute("PRAGMA foreign_keys = ON")
 
     def _normalize(self):
         """База от первой версии: логины и группы хранились как введены (Петров, 8к51) — приводим к login_key/group_key."""
@@ -229,6 +260,20 @@ class Store:
         n = self.db.execute("DELETE FROM group_posts WHERE until < ?", (now,)).rowcount
         self.db.commit()
         return n
+
+    def delete_posts(self, group, ids):
+        """Староста отменил рассылки: удалить их у всей группы. Чужие группы не трогаем. Возвращает число удалённых."""
+        ids = [int(i) for i in ids]
+        if not ids:
+            return 0
+        n = self.db.execute(f"DELETE FROM group_posts WHERE grp = ? AND id IN ({', '.join('?' * len(ids))})",
+                            (group_key(group), *ids)).rowcount
+        self.db.commit()
+        return n
+
+    def post_ids(self):
+        """id всех рассылок в базе (чтобы забыть скрытые студентами рассылки, которых уже нет)."""
+        return {r[0] for r in self.db.execute("SELECT id FROM group_posts")}
 
     def posts(self, group, subgroup=None, after=None, kind=None):
         """Рассылки группе, которые ещё актуальны (until >= after), для студента из подгруппы subgroup:

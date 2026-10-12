@@ -20,7 +20,7 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = json.load(open(os.path.join(HERE, "tools.json"), encoding="utf-8"))
-# Рассылки группе видит в промпте только староста: у студента промпт на ~500 токенов короче (обучение быстрее,
+# Рассылки группе видит в промпте только староста: у студента промпт на ~700 токенов короче (обучение быстрее,
 # первый ответ тоже), а модель не может даже попытаться разослать что-то группе. Права всё равно проверяет backend.py.
 GROUP_TOOLS = {t["function"]["name"] for t in TOOLS if t["function"]["name"].startswith("group_")}
 STUDENT_TOOLS = [t for t in TOOLS if t["function"]["name"] not in GROUP_TOOLS]

@@ -332,6 +332,8 @@ while True:
     msgs.append({"role": "user", "content": q})
     forget_old(KEEP_TURNS)
     last_raw[0] = ""
+    conv = backend.conversation()  # номера списков и «удалить все?»: если ход уберём из истории, вернём как было
+    backend.new_turn()
     try:
         text, err = answer(), None
     except (ContextOverflow, ServerError) as e:  # даже один вопрос не влез в контекст или сервер недоступен
@@ -344,8 +346,12 @@ while True:
         if any(x["role"] == "tool" for x in msgs[u:]):
             # инструменты уже сработали (например, рассылка ушла): ход оставляем, ответ модели заменяем отказом
             msgs.append({"role": "assistant", "content": e.hit["answer"] or guard.answer})
+            # списков из этого хода студент не видел: «удали 2» — про прежний список; но сообщение было, и «да» на
+            # «удалить все?» из позапрошлого сообщения уже не подтверждает
+            backend.restore(dict(conv, turn=backend.turn))
         else:  # ход целиком убираем из истории, чтобы модель не продолжила эту тему
             del msgs[u:]
+            backend.restore(conv)
         say_blocked(e.hit, "запретная фраза в ответе модели")
         continue
     if text:
@@ -354,6 +360,7 @@ while True:
     else:
         # Неудачный ход в историю не кладём: модель не должна видеть «не получилось» как образец ответа
         del msgs[max(i for i, x in enumerate(msgs) if x["role"] == "user"):]
+        backend.restore(conv)
         print("Ишка>", FALLBACK)
         if isinstance(err, Exception):
             print(f"  [ошибка сервера: {err}]")

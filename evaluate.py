@@ -4,18 +4,21 @@
     python evaluate.py --model out/lora            # дообученная (LoRA)
     python evaluate.py --model unsloth/Qwen3-4B-Instruct-2507   # база, для сравнения
     python evaluate.py --model out/lora --step 2   # шаг после результата инструмента: ответ текстом, а не новый вызов
+    python evaluate.py --model out/lora --step 3   # следующие сообщения в диалоге: номер из списка, «да», уточнение
 """
 import argparse, collections, json, re, sys
 from unsloth import FastLanguageModel
 from prompt_format import CALL_THRESHOLD, answer_prefix, answer_text, parse_call, prompt_diff, tools_for  # как в chat.py
+from backend import _nums, _stems  # номера и слова для delete_items — как их понимает бэкенд
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--model", default="out/lora")
 ap.add_argument("--data", default="data/eval.jsonl")
 ap.add_argument("--limit", type=int, default=0, help="сколько примеров (0 — все)")
 ap.add_argument("--max-errors", type=int, default=20, help="сколько ошибок показать (-1 — все)")
-ap.add_argument("--step", type=int, choices=(1, 2), default=1,
-                help="1 — первый ответ на вопрос; 2 — ответ после результата инструмента")
+ap.add_argument("--step", type=int, choices=(1, 2, 3), default=1,
+                help="1 — первый ответ на вопрос; 2 — ответ после результата инструмента; "
+                     "3 — ответ на следующие сообщения студента (выбрал номер, сказал «да», уточнил время)")
 a = ap.parse_args()
 
 model, tok = FastLanguageModel.from_pretrained(a.model, max_seq_length=4096, load_in_4bit=True)
@@ -68,13 +71,26 @@ FREE = {"text", "task", "title"}  # свободный текст: «Купит�
 words = lambda v: re.sub(r"[^\w]+", " ", norm(v).replace("ё", "е")).strip()
 
 
+def clean(args):
+    """Пустой необязательный аргумент (null, "", []) и all: false — всё равно что его нет."""
+    return {k: v for k, v in args.items() if not (v is None or v == "" or v == [] or (k == "all" and v is False))}
+
+
 def same_args(ga, pa):
+    ga, pa = clean(ga), clean(pa)
     if set(ga) != set(pa):
         return False
     for k, v in ga.items():
         if k in FREE:
             g, p = words(v), words(pa[k])
             if not (g == p or (g and p and (g in p or p in g))):
+                return False
+        elif k == "query":  # «пароли» и «пароль», «пароль от почты» и «пароль»: бэкенд ищет по основам слов
+            g, p = set(_stems(str(v))), set(_stems(str(pa[k])))
+            if not (g == p or (g and p and (g <= p or p <= g))):
+                return False
+        elif k == "numbers":  # [4, 2] и [2, 4], "2" и [2] — одно и то же
+            if _nums(pa[k]) is None or sorted(_nums(v) or []) != sorted(_nums(pa[k])):
                 return False
         elif norm(v) != norm(pa[k]):
             return False
@@ -152,8 +168,61 @@ def step2():
         print(f"  {k}: {hit[k]}/{v}")
 
 
+def step3():
+    """Следующие сообщения студента в том же диалоге: номер из показанного списка («2», «вторую»), «да» после
+    «удалить все?», время после «когда напомнить?». Подаём диалог до этого сообщения включительно — правильно ли
+    модель вызывает инструмент (с аргументами) или отвечает текстом, как в датасете."""
+    n = ok = g_ok = 0
+    per, hit = collections.Counter(), collections.Counter()
+    for i, line in enumerate(lines, 1):
+        msgs = json.loads(line)["messages"]
+        for j in [j for j, m in enumerate(msgs) if m["role"] == "user"][1:]:
+            gold = msgs[j + 1]
+            text, greedy, p = generate(msgs[: j + 1])
+            call, gcall = parse_call(text), parse_call(greedy)
+            n += 1
+            if gold.get("tool_calls"):
+                g = gold["tool_calls"][0]["function"]
+                key, pa = g["name"], (call or {}).get("arguments") or {}
+                if isinstance(pa, str):
+                    try:
+                        pa = json.loads(pa)
+                    except ValueError:
+                        pass
+                good = bool(call) and call.get("name") == g["name"] and isinstance(pa, dict) and same_args(g["arguments"], pa)
+                g_ok += bool(gcall) and gcall.get("name") == g["name"]
+                if not good:
+                    error(f"[шаг 3] {msgs[j]['content']!r}: ждали {g['name']} {g['arguments']}, получили "
+                          f"{call and call.get('name')} {pa if call else ''} (P(<tool_call>) = {pct(p)})\n  сырой ответ: {raw(text)}")
+            else:
+                key = "ответ текстом"
+                good = call is None and bool(answer_text(text))
+                g_ok += gcall is None
+                if not good:
+                    error(f"[шаг 3, ждали текст] {msgs[j]['content']!r}: получили {call and call.get('name')} "
+                          f"(P(<tool_call>) = {pct(p)})\n  сырой ответ: {raw(text)}")
+            ok += good
+            per[key] += 1
+            hit[key] += good
+        if i % 10 == 0 or i == len(lines):
+            print(f"  проверено диалогов {i}/{len(lines)}", file=sys.stderr, flush=True)
+
+    if 0 <= a.max_errors < len(errors):
+        print(f"... не показано ошибок: {len(errors) - a.max_errors} (показать все: --max-errors -1)")
+    if not n:
+        raise SystemExit("В данных нет диалогов с несколькими сообщениями студента")
+    print(f"\nСледующих сообщений студента: {n}\nВерно (инструмент и аргументы или ответ текстом): {ok / n:.0%}"
+          f" (жадным выбором токена, только инструмент: {g_ok / n:.0%})")
+    print("\nПо инструментам (верно/всего):")
+    for k, v in per.most_common():
+        print(f"  {k}: {hit[k]}/{v}")
+
+
 if a.step == 2:
     step2()
+    raise SystemExit
+if a.step == 3:
+    step3()
     raise SystemExit
 
 for line in lines:
