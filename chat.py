@@ -43,7 +43,7 @@ if guard.error:
 path = a.db or os.environ.get("ISHKA_DB") or str(DEFAULT_DB)
 if not os.path.exists(path):
     raise SystemExit(f"Базы аккаунтов {path} нет: сначала заведи аккаунт, например\n"
-                     f"  python accounts.py add {a.login or 'ivanov'} --group 8К51 --subgroup 2 --english Аксёнова")
+                     f"  python accounts.py{f' --db {a.db}' if a.db else ''} add {a.login or 'ivanov'} --group 8К51 --subgroup 2 --english Аксёнова")
 store = Store(path)
 login = a.login or input("логин: ")
 password = os.environ.get("ISHKA_PASSWORD")  # для проверок без ввода руками
@@ -379,9 +379,9 @@ def tick():
         ok = turn("[авто] утренний брифинг")
         printed = True
         brief_retry[0] += not ok
-        if ok or brief_retry[0] >= 3:
+        if ok or brief_retry[0] >= 3:  # 3 неудачи — в этот раз больше не пробуем, но день не отмечаем: перезапуск покажет брифинг
             brief_day[0], brief_retry[:] = today, [0, None]
-            if not a.now:
+            if ok and not a.now:
                 store.set_brief_date(acc["id"], today)
         else:
             brief_retry[1] = now + dt.timedelta(minutes=5)

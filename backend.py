@@ -5,7 +5,7 @@
     conversation.py — списки с номерами и удаление по ним; состояние разговора
     dates.py        — разбор дат и времени
 Генератор датасета вызывает те же инструменты, поэтому ответы инструментов в обучении настоящие."""
-import json, pathlib
+import json, pathlib, re
 from campus import (Campus, BUILDINGS, ENG_TEACHERS, EVENTS, EVENT_KINDS, HOLIDAYS, LESSONS, SESSION, SUBJECTS, WD_RU,
                     resolve_building, resolve_subject, walk_minutes, week_parity)
 from conversation import Conversation
@@ -70,7 +70,7 @@ def check_args(spec, args):
             continue
         t = p.get("type")
         if t == "integer":
-            if isinstance(v, str) and v.strip().lstrip("-").isdigit() and len(v.strip()) < 10:
+            if isinstance(v, str) and re.fullmatch(r"\s*-?[0-9]{1,9}\s*", v):
                 v = int(v)
             elif isinstance(v, float) and v.is_integer() and abs(v) < 1e9:
                 v = int(v)

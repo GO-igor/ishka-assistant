@@ -554,6 +554,45 @@ def cat_note_clarify(split):
     return msgs + [tc("add_note", args), tr("add_note", res), {"role": "assistant", "content": note_answer(cap(what))}]
 
 
+DAY_ONLY_PHR = ["напомни {d} {x}", "{d} напомни {x}", "напомни мне {x} {d}", "не дай забыть {x} {d}", "можешь {d} напомнить {x}?",
+                "поставь напоминание {d}: {x}", "кинь напоминалку {d} — {x}", "{d} надо {x}, напомни", "напомни {x} {d} пж",
+                "запиши и напомни {d}: {x}"]
+ASK_HOUR = ["Во сколько напомнить {d}? 🙂", "Ок! А во сколько {d}? Например «в 9» или «в 18:30».", "{D} — понял. Во сколько напомнить?",
+            "Напомню {d} 👌 Скажи только время: «в 10», «в 19:00»…"]
+
+
+def cat_note_day_only(split):
+    """День назван, а час нет («напомни в пятницу сдать отчёт»): Ишка спрашивает время. Иногда модель сначала зовёт
+    add_note без часа, получает bad_time — и тоже спрашивает, а не сохраняет просто заметку."""
+    now, p = rand_now((7, 21)), rand_profile()
+    b = account_backend(now, p)
+    what = pick(REM_TASKS)
+    form = pick(["tomorrow", "weekday", "weekday", "date"])
+    if form == "tomorrow":
+        spoken, day = "завтра", "tomorrow"
+    elif form == "weekday":
+        wd = pick([x for x in range(7) if x != now.weekday()])
+        spoken, day = WEEKDAYS_FUT[wd], WEEKDAYS[wd]
+    else:
+        d = now.date() + dt.timedelta(days=rnd.randint(3, 40))
+        spoken, day = date_ru(d), d.isoformat()
+    h, m = rnd.randint(8, 21), pick([0, 0, 0, 30, 15])
+    if m:
+        t = pick([f"в {h}:{m:02d}", f"{h}:{m:02d}"])
+    else:
+        t = pick([f"в {h}", f"в {h}:00", f"{h}:00", f"часов в {h}"] + ([f"в {h} утра"] if h < 12 else [f"в {h - 12} вечера"] if h >= 17 else []))
+    msgs = [system(now, p), {"role": "user", "content": pick(split_phr(DAY_ONLY_PHR, split)).format(d=spoken, x=what)}]
+    if rnd.random() < 0.2:
+        bad = {"text": cap(what), "at": day}
+        msgs += [tc("add_note", bad), tr("add_note", b.add_note(**bad))]
+    msgs += [{"role": "assistant", "content": pick(ASK_HOUR).format(d=spoken, D=cap(spoken))}, {"role": "user", "content": t}]
+    args = {"text": cap(what), "at": f"{day} {h:02d}:{m:02d}"}
+    res = b.add_note(**args)
+    if not res.get("ok"):
+        return None
+    return msgs + [tc("add_note", args), tr("add_note", res), {"role": "assistant", "content": reminder_answer(now, res, what)}]
+
+
 def hw_rem_answer(now, res, task):
     cls, f = when_ru(now, res["class_at"]), when_ru(now, res["fire_at"])
     d = dat(short(res["subject"]))
@@ -747,20 +786,49 @@ def rand_session(now):
     return {"start": start.isoformat(), "end": end.isoformat(), "exams": exams}
 
 
+CREDIT_CODES = [("hist", "зачёт"), ("intro", "дифзачёт"), ("eng", "зачёт"), ("proj", "зачёт")]
+EXAM_GEN = {"экзамен": "экзамена", "зачёт": "зачёта", "дифзачёт": "дифзачёта"}
+
+
+def add_credits(session):
+    """Зачёты и дифзачёты (db/session.json это позволяет) — в зачётную неделю перед сессией, часть ещё без даты."""
+    days = no_sunday([dt.date(2026, 12, 21) + dt.timedelta(days=k) for k in range(10)])
+    for code, kind in rnd.sample(CREDIT_CODES, rnd.randint(1, 4)):
+        e = {"subject": code, "kind": kind, "date": None}
+        if rnd.random() < 0.7:
+            d = pick(days)
+            days.remove(d)
+            e["date"] = d.isoformat()
+            if rnd.random() < 0.5:
+                e["time"] = pick(["10:25", "12:40", "14:35"])
+        session["exams"].append(e)
+
+
 def exam_line(e):
     d = dt.date.fromisoformat(e["date"])
     t = f" в {e['time']}" if e.get("time") else ""
     return f"{WD_SHORT[d.weekday()]} {date_ru(d)}{t}{where(e)}"
 
 
-def cat_session(split):
+def cat_session(split, mixed=False):
+    """mixed — в сессии ещё зачёты и дифзачёты (раздел 6); без него порядок случайных чисел прежний (раздел 2)."""
     now, p = rand_now(), rand_profile()
     b = Backend(now, p)
     b.session = rand_session(now)
+    if mixed:
+        add_credits(b.session)
     if rnd.random() < 0.1:  # сессия уже идёт
         a = dt.date.fromisoformat(b.session["start"])
         b.now = now = dt.datetime.combine(a + dt.timedelta(days=rnd.randint(0, 10)), now.time())
-    if rnd.random() < 0.4:
+    if mixed and rnd.random() < 0.5:
+        e0 = pick(b.session["exams"]) if rnd.random() < 0.85 else {"subject": pick(["pe", "kod"]), "kind": "зачёт"}
+        code, kind = e0["subject"], e0["kind"]
+        alias = sub_alias(code)
+        q = pick(split_phr(["когда {k} по {sd}?", "{k} по {sd} когда", "{s} — {k} какого числа?", "через сколько дней {k} по {sd}",
+                            "когда сдаём {s}?", "{k} по {sd} уже назначили?", "когда {k} по {sd}", "дата {kg} по {sd}?"],
+                           split)).format(k=kind, kg=EXAM_GEN[kind], s=alias, sd=sdat(alias))
+        args = {"subject": alias}
+    elif not mixed and rnd.random() < 0.4:
         code = pick(EXAM_CODES + ["hist", "intro"])
         alias = sub_alias(code)
         q = pick(split_phr(["когда экзамен по {sd}?", "сколько до экза по {sd}", "экзамен по {sd} когда", "{s} экзамен какого числа",
@@ -776,7 +844,10 @@ def cat_session(split):
     start, end = dt.date.fromisoformat(res["start"]), dt.date.fromisoformat(res["end"])
     head = (f"Сессия уже идёт, до {date_ru(end)} 💪" if res["status"] == "now" else
             f"До сессии {days_n(res['days_left'])} ⏳ Она с {date_ru(start)} по {date_ru(end)}.")
-    if res.get("error") == "no_exam":
+    if res.get("error") == "no_exam" and mixed:
+        ans = f"По {dat(alias)} в списке сессии нет ни экзамена, ни зачёта 🙂 " + (
+            f"Сессия начнётся {date_ru(start)}, через {days_n(res['days_left'])}." if res["status"] == "soon" else f"Сессия идёт до {date_ru(end)}.")
+    elif res.get("error") == "no_exam":
         ans = f"По {dat(alias)} экзамена в сессии нет 🙂 " + (f"Сессия начнётся {date_ru(start)}, через {days_n(res['days_left'])}."
                                                             if res["status"] == "soon" else f"Сессия идёт до {date_ru(end)}.")
     elif args:
@@ -784,17 +855,20 @@ def cat_session(split):
         if e and e.get("date"):
             ans = f"{cap(e['kind'])} по {dat(short(e['subject']))} — {exam_line(e)}, {in_days(e['days_left'])} ⏳"
         elif e:
-            ans = (f"Дату экзамена по {dat(short(e['subject']))} пока не объявили 🤷 "
+            ans = (f"Дату {EXAM_GEN[e['kind']]} по {dat(short(e['subject']))} пока не объявили 🤷 "
                    + (f"Сессия начнётся {date_ru(start)}, через {days_n(res['days_left'])}." if res["status"] == "soon"
                       else f"Сессия уже идёт, до {date_ru(end)}."))
         else:
-            ans = f"Экзамен по {dat(short(SUBJECTS[code]['name']))} уже позади 🎉"
+            ans = f"{cap(kind) if mixed else 'Экзамен'} по {dat(short(SUBJECTS[code]['name']))} уже позади 🎉"
     else:
         dated = [e for e in res["exams"] if e.get("date")]
-        undated = [short(e["subject"]) for e in res["exams"] if not e.get("date")]
+        undated = [short(e["subject"]) + (f" ({e['kind']})" if mixed else "") for e in res["exams"] if not e.get("date")]
         lines = [f"• {exam_line(e)} — {short(e['subject'])}, {e['kind']} ({in_days(e['days_left'])})" for e in dated]
-        ans = head + ("\n\n" + pick(["Экзамены:\n", "Что сдаём:\n"]) + "\n".join(lines) if lines else "")
-        if undated:
+        ans = head + ("\n\n" + ("Что сдаём:\n" if mixed else pick(["Экзамены:\n", "Что сдаём:\n"])) + "\n".join(lines) if lines else "")
+        if undated and mixed:
+            ans += ("\n\n" if lines else " ") + (f"Пока без даты: {undated[0]}." if len(undated) == 1
+                                                 else f"Даты пока не объявили: {', '.join(undated)}.")
+        elif undated:
             ans += ("\n\n" if lines else " ") + (f"Дату экзамена по предмету «{undated[0]}» пока не объявили." if len(undated) == 1
                                                  else f"Даты экзаменов пока не объявили: {', '.join(undated)}.")
     return [system(now, p), {"role": "user", "content": q}, tc("get_session", args), tr("get_session", res),
@@ -2298,9 +2372,11 @@ if __name__ == "__main__":
             rows += build(222 - len(rows), split, DELETE_CATS)
         data[split] += rows
         rnd.shuffle(data[split])
-        # 6) «Сделай напоминание о ДЗ» без предмета — свой генератор, чтобы не сдвинуть разделы выше
+        # 6) «Сделай напоминание о ДЗ» без предмета, «напомни в пятницу …» без часа, зачёты в сессии — свой генератор,
+        #    чтобы не сдвинуть разделы выше; eval — по 5 на категорию
         rnd = random.Random(6060 if split == "train" else 6061)
-        data[split] += build(40 if split == "train" else 5, split, [(cat_hw_reminder_ask, 1)])
+        for cat, n in ((cat_hw_reminder_ask, 40), (cat_note_day_only, 50), (lambda sp: cat_session(sp, mixed=True), 30)):
+            data[split] += build(n if split == "train" else 5, split, [(cat, 1)])
         rnd.shuffle(data[split])
         rnd = main_rnd
         with open(root / f"{split}.jsonl", "w", encoding="utf-8") as f:
