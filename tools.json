@@ -131,7 +131,7 @@
   "type": "function",
   "function": {
    "name": "get_events",
-   "description": "Мероприятия и хакатоны ТПУ.",
+   "description": "Мероприятия и хакатоны для студентов ИШИТР.",
    "parameters": {
     "type": "object",
     "properties": {

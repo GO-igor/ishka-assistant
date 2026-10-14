@@ -1,4 +1,4 @@
-"""Справочные инструменты: расписание, аудитории, преподаватели, дорога, перекус, мероприятия ТПУ, сессия.
+"""Справочные инструменты: расписание, аудитории, преподаватели, дорога, перекус, мероприятия ИШИТР, сессия.
 Только читают db/*.json (их собирает db/build_db.py; events.json и session.json заполняются руками)."""
 import datetime as dt, json, pathlib, re, unicodedata
 from dates import WEEKDAYS, parse_day
@@ -251,7 +251,7 @@ class Campus:
         return out
 
     def get_events(self, kind=None, period="month"):
-        """Мероприятия и хакатоны ТПУ (db/events.json), которые ещё не начались, по дате; не больше 10."""
+        """Мероприятия и хакатоны для студентов ИШИТР (db/events.json), которые ещё не начались, по дате; не больше 10."""
         limit = EVENT_PERIODS.get(period, 31)
         today, items = self.now.date(), []
         for e in self.events:

@@ -7,8 +7,8 @@ chat.py сам собирает промпт ровно как при обуче
 Запуск (без входа Ишка не работает; аккаунт заводится в accounts.py, профиль, заметки и напоминания хранятся
 в db/ishka.sqlite):
     pip install jinja2 && python chat.py --login ivanov
-Сработавшие напоминания Ишка показывает при входе и перед каждым ответом, утренний брифинг — сам, при первом
-входе за день с 7:30 до 12:00 (или в это время, если чат открыт).
+Сработавшие напоминания Ишка показывает при входе, перед каждым ответом и раз в минуту, пока чат открыт; утренний
+брифинг — сам, при первом входе за день с 7:30 до 12:00 или ровно в 7:30, если чат открыт (не ответил сервер — повторит).
 Запретные фразы (db/blocklist.json, guard.py): на такой вопрос Ишка отвечает отказом из списка, ответ модели или
 вызов инструмента с такой фразой не выводится. Список можно править, не закрывая чат.
 Другие серверы (OpenAI-совместимый API, шаблон и вызовы разбирает сервер):
@@ -16,7 +16,7 @@ chat.py сам собирает промпт ровно как при обуче
     vllm serve out/merged --served-model-name ishka --enable-auto-tool-choice --tool-call-parser hermes --port 8080
                   → python chat.py --api openai
 """
-import argparse, datetime as dt, getpass, json, os, unicodedata, urllib.error, urllib.request
+import argparse, datetime as dt, getpass, json, os, select, sys, unicodedata, urllib.error, urllib.request
 from backend import Backend
 from conversation import Conversation
 from gen_dataset import system
@@ -303,7 +303,8 @@ def say_blocked(hit, why):
 
 
 def turn(q):
-    """Один вопрос студента (или «[авто] утренний брифинг»): ответ модели, отказ или «не получилось»."""
+    """Один вопрос студента (или «[авто] утренний брифинг»): ответ модели, отказ или «не получилось».
+    Возвращает False, если ответить не получилось."""
     msgs.append({"role": "user", "content": q})
     forget_old(KEEP_TURNS)
     last_raw[0] = ""
@@ -328,11 +329,11 @@ def turn(q):
             del msgs[u:]
             conv.restore(snap)
         say_blocked(e.hit, "запретная фраза в ответе модели")
-        return
+        return True
     if text:
         msgs.append({"role": "assistant", "content": text})
         print("Ишка>", text)
-        return
+        return True
     # Неудачный ход в историю не кладём: модель не должна видеть «не получилось» как образец ответа
     del msgs[max(i for i, x in enumerate(msgs) if x["role"] == "user"):]
     conv.restore(snap)
@@ -341,10 +342,12 @@ def turn(q):
         print(f"  [ошибка сервера: {err}]")
     elif not err:
         print(f"  [сырой ответ модели: {last_raw[0][:300]!r}]" if last_raw[0].strip() else "  [модель вернула пустой ответ]")
+    return False
 
 
 BRIEF_FROM, BRIEF_TO = dt.time(7, 30), dt.time(12, 0)  # утренний брифинг сам — при первом входе за день в это время
 brief_day = [acc.get("brief_date")]
+brief_retry = [0, None]  # брифинг не получился (сервер не ответил): сколько раз и когда пробовать снова (через 5 минут, до 3 раз)
 told = set()  # с --now напоминания не удаляются: каждое показываем один раз
 
 
@@ -357,8 +360,10 @@ def reminder_line(r):
 
 
 def tick():
-    """Перед каждым вопросом: часы, сработавшие напоминания и утренний брифинг."""
+    """Перед каждым вопросом и раз в минуту, пока студент молчит: часы, сработавшие напоминания и утренний брифинг.
+    Возвращает True, если что-то напечатал."""
     global now
+    printed = False
     if not a.now:
         now = dt.datetime.now().replace(second=0, microsecond=0)
         backend.now = now
@@ -368,12 +373,37 @@ def tick():
         if key not in told:
             told.add(key)
             print(reminder_line(r))
+            printed = True
     today = now.date().isoformat()
-    if BRIEF_FROM <= now.time() < BRIEF_TO and brief_day[0] != today:
-        brief_day[0] = today
-        if not a.now:
-            store.set_brief_date(acc["id"], today)
-        turn("[авто] утренний брифинг")
+    if BRIEF_FROM <= now.time() < BRIEF_TO and brief_day[0] != today and (brief_retry[1] is None or now >= brief_retry[1]):
+        ok = turn("[авто] утренний брифинг")
+        printed = True
+        brief_retry[0] += not ok
+        if ok or brief_retry[0] >= 3:
+            brief_day[0], brief_retry[:] = today, [0, None]
+            if not a.now:
+                store.set_brief_date(acc["id"], today)
+        else:
+            brief_retry[1] = now + dt.timedelta(minutes=5)
+    return printed
+
+
+IDLE_CHECK = 60  # секунд: пока студент молчит, так часто проверяем напоминания и брифинг
+
+
+def read_line(prompt):
+    """Сообщение студента. Пока он молчит, раз в минуту tick(): напоминание или брифинг в 7:30 приходят сами,
+    даже если чат просто открыт. Где ждать ввод с таймаутом нельзя (Windows, ввод не с клавиатуры) — обычный input."""
+    if os.name == "nt" or not sys.stdin.isatty():
+        return input(prompt)
+    print(prompt, end="", flush=True)
+    while not select.select([sys.stdin], [], [], IDLE_CHECK)[0]:
+        if tick():
+            print(prompt, end="", flush=True)
+    line = sys.stdin.readline()
+    if not line:
+        raise EOFError
+    return line.rstrip("\n")
 
 
 guard_error = [None]  # о сломанном файле при перечитывании говорим один раз
@@ -382,7 +412,7 @@ guard_error = [None]  # о сломанном файле при перечиты
 tick()
 while True:
     try:
-        q = unicodedata.normalize("NFC", input("ты> "))
+        q = unicodedata.normalize("NFC", read_line("ты> "))
     except (EOFError, KeyboardInterrupt):
         break
     hit = guard.check(q)
