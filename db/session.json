@@ -1,0 +1,11 @@
+{
+ "_как_заполнять": "Даты сессии и экзаменов для инструмента get_session («сколько до сессии», «когда экзамен по матану»). Ниже ПРИМЕР: замени даты настоящими. start и end — первый и последний день сессии (YYYY-MM-DD). В exams: subject — код предмета из subjects.json (python, inf, math, matlog…), kind — экзамен, зачёт или дифзачёт, date — YYYY-MM-DD или null, пока дату не объявили; time, building, room — по желанию.",
+ "start": "2027-01-11",
+ "end": "2027-01-30",
+ "exams": [
+  {"subject": "python", "kind": "экзамен", "date": null},
+  {"subject": "inf", "kind": "экзамен", "date": null},
+  {"subject": "math", "kind": "экзамен", "date": null},
+  {"subject": "matlog", "kind": "экзамен", "date": null}
+ ]
+}

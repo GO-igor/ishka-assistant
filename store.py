@@ -1,13 +1,13 @@
-"""Аккаунты, рассылки старосты и личные данные студентов в SQLite (db/ishka.sqlite).
+"""Аккаунты, личные заметки и напоминания, объявления старосты — в SQLite (db/ishka.sqlite).
 Регистрации нет: аккаунты заводятся руками через accounts.py, пароли хранятся только в виде хеша.
-Роли: student и starosta. Староста рассылает своей группе (или подгруппе) Д/З, мероприятия и напоминания;
-студенты видят их в брифинге, в Д/З, в мероприятиях и в напоминаниях.
+Роли: student и starosta. Староста отправляет своей группе (или подгруппе) объявления и Д/З; студенты видят их
+в брифинге и в списке записей.
 Store(":memory:") — база в памяти (генератор датасета, тесты). Сайт может пользоваться этим же классом."""
 import datetime as dt, hashlib, hmac, json, os, pathlib, secrets, sqlite3, unicodedata
 
 DEFAULT_DB = pathlib.Path(__file__).parent / "db" / "ishka.sqlite"
 ROLES = ("student", "starosta")
-KINDS = ("homework", "event", "reminder")
+KINDS = ("announcement", "homework")
 ITERATIONS = 600_000  # PBKDF2-SHA256, рекомендация OWASP
 
 SCHEMA = """
@@ -21,24 +21,30 @@ CREATE TABLE IF NOT EXISTS accounts (
     subgroup INTEGER,
     english_teacher TEXT,
     adaptation INTEGER NOT NULL DEFAULT 0,
+    brief_date TEXT,                        -- в какой день уже показан утренний брифинг
     created TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS group_posts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,   -- id удалённой рассылки не достанется новой (студенты скрывают по id)
+CREATE TABLE IF NOT EXISTS notes (          -- личные заметки и напоминания
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    text TEXT NOT NULL,
+    fire_at TEXT,                           -- 'YYYY-MM-DD HH:MM': когда напомнить; NULL — просто заметка
+    subject TEXT,                           -- код предмета: напоминание о Д/З накануне пары
+    class_at TEXT,                          -- начало этой пары
+    created TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS notes_account ON notes (account_id);
+CREATE TABLE IF NOT EXISTS group_posts (    -- объявления и Д/З от старосты
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     author_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
     grp TEXT NOT NULL,
     subgroup INTEGER,                       -- NULL — всей группе
-    kind TEXT NOT NULL CHECK (kind IN ('homework', 'event', 'reminder')),
-    data TEXT NOT NULL,                     -- JSON: subject/task/due, title/date/time/place, text/fire_at
-    until TEXT NOT NULL,                    -- 'YYYY-MM-DD HH:MM': после этого момента не показываем
+    kind TEXT NOT NULL CHECK (kind IN ('announcement', 'homework')),
+    data TEXT NOT NULL,                     -- JSON: text и at (когда событие) или subject, task, due
+    until TEXT NOT NULL,                    -- 'YYYY-MM-DD HH:MM': после этого момента удаляется
     created TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS group_posts_grp ON group_posts (grp, until);
-CREATE TABLE IF NOT EXISTS user_data (       -- личные Д/З, заметки, напоминания, дедлайны, экзамены
-    account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
-    data TEXT NOT NULL,
-    updated TEXT NOT NULL
-);
 """
 
 
@@ -99,36 +105,60 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
-        self._autoincrement()
+        self._migrate()
         self._normalize()
 
-    def _autoincrement(self):
-        """База до 12.10.2026: id рассылок без AUTOINCREMENT, и новая рассылка получала id только что удалённой.
-        Студент, скрывший у себя старую (hidden: post:id), не увидел бы новую. Переделываем таблицу, данные те же."""
-        sql = self.db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'group_posts'").fetchone()[0]
-        if "AUTOINCREMENT" in sql.upper():
+    def _migrate(self):
+        """База до 14.10.2026: личные данные лежали одним JSON (user_data), у старосты были мероприятия и напоминания.
+        Заметки и напоминания переносим в notes, мероприятия и напоминания старосты становятся объявлениями;
+        Д/З, дедлайны и экзамены студента удаляются: этих функций больше нет."""
+        tables = {r[0] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(accounts)")}
+        sql = self.db.execute("SELECT sql FROM sqlite_master WHERE name = 'group_posts'").fetchone()[0]
+        if "user_data" not in tables and "brief_date" in cols and "'announcement'" in sql:
             return
-        table = SCHEMA[SCHEMA.index("CREATE TABLE IF NOT EXISTS group_posts"):SCHEMA.index("CREATE INDEX")]
-        # без проверки ссылок: рассылка удалённого вручную аккаунта не должна мешать переносу (так советует SQLite)
-        self.db.execute("PRAGMA foreign_keys = OFF")
+        self.db.execute("PRAGMA foreign_keys = OFF")  # рассылка удалённого вручную аккаунта не должна мешать переносу
         try:
             self.db.execute("BEGIN")
-            try:
-                self.db.execute("ALTER TABLE group_posts RENAME TO group_posts_old")
+            if "brief_date" not in cols:
+                self.db.execute("ALTER TABLE accounts ADD COLUMN brief_date TEXT")
+            if "'announcement'" not in sql:
+                old = self.db.execute("SELECT * FROM group_posts").fetchall()
+                self.db.execute("DROP TABLE group_posts")
+                table = SCHEMA[SCHEMA.index("CREATE TABLE IF NOT EXISTS group_posts"):SCHEMA.index("CREATE INDEX IF NOT EXISTS group_posts")]
                 self.db.execute(table)
-                self.db.execute("INSERT INTO group_posts SELECT * FROM group_posts_old")
-                self.db.execute("DROP TABLE group_posts_old")
                 self.db.execute("CREATE INDEX IF NOT EXISTS group_posts_grp ON group_posts (grp, until)")
-                self.db.execute("COMMIT")
-            except sqlite3.OperationalError as e:
-                if self.db.in_transaction:
-                    self.db.execute("ROLLBACK")
-                if "readonly" in str(e) or "locked" in str(e):
-                    return  # базу только читают (или её держит другой процесс): перенесём при следующем запуске
-                raise
-            except Exception:
+                for r in old:
+                    kind, data = r["kind"], json.loads(r["data"])
+                    if kind == "event":
+                        kind, data = "announcement", {"text": data["title"] + (f", {data['place']}" if data.get("place") else ""),
+                                                      "at": data["date"] + (f" {data['time']}" if data.get("time") else "")}
+                    elif kind == "reminder":
+                        kind, data = "announcement", {"text": data["text"], "at": data["fire_at"]}
+                    self.db.execute("INSERT INTO group_posts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                    (r["id"], r["author_id"], r["grp"], r["subgroup"], kind,
+                                     json.dumps(data, ensure_ascii=False), r["until"], r["created"]))
+            if "user_data" in tables:
+                for r in self.db.execute("SELECT account_id, data, updated FROM user_data").fetchall():
+                    data = json.loads(r["data"])
+                    for t in data.get("notes") or []:
+                        self.db.execute("INSERT INTO notes (account_id, text, created) VALUES (?, ?, ?)",
+                                        (r["account_id"], str(t), r["updated"]))
+                    for x in data.get("reminders") or []:
+                        self.db.execute("INSERT INTO notes (account_id, text, fire_at, created) VALUES (?, ?, ?, ?)",
+                                        (r["account_id"], str(x.get("text") or ""), x.get("fire_at"), r["updated"]))
+                self.db.execute("DROP TABLE user_data")
+            self.db.execute("COMMIT")
+        except sqlite3.OperationalError as e:
+            if self.db.in_transaction:
                 self.db.execute("ROLLBACK")
+            if "readonly" not in str(e) and "locked" not in str(e):
                 raise
+            # базу только читают (или её держит другой процесс): перенесём при следующем запуске
+        except Exception:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
         finally:
             self.db.execute("PRAGMA foreign_keys = ON")
 
@@ -217,7 +247,7 @@ class Store:
         return cur.rowcount > 0
 
     def profile(self, acc):
-        """Профиль для Backend: то же, что set_profile, плюс группа и роль."""
+        """Профиль для Backend: подгруппа, преподаватель английского, курсы (А), группа и роль."""
         p = {"group": acc["grp"], "role": acc["role"]}
         if acc.get("subgroup"):
             p["subgroup"] = acc["subgroup"]
@@ -227,14 +257,8 @@ class Store:
             p["adaptation"] = True
         return p
 
-    def save_profile(self, account_id, profile):
-        self.db.execute("UPDATE accounts SET subgroup = ?, english_teacher = ?, adaptation = ? WHERE id = ?",
-                        (profile.get("subgroup"), profile.get("english_teacher"), int(bool(profile.get("adaptation"))),
-                         account_id))
-        self.db.commit()
-
     def members(self, group, subgroup=None, exclude=None):
-        """Сколько студентов получит рассылку: вся группа или подгруппа (и те, у кого подгруппа не указана)."""
+        """Сколько студентов получит объявление: вся группа или подгруппа (и те, у кого подгруппа не указана)."""
         q, args = "SELECT COUNT(*) FROM accounts WHERE grp = ?", [group_key(group)]
         if subgroup:
             q += " AND (subgroup = ? OR subgroup IS NULL)"
@@ -244,7 +268,7 @@ class Store:
             args.append(exclude)
         return self.db.execute(q, args).fetchone()[0]
 
-    # ---------- рассылки старосты ----------
+    # ---------- объявления и Д/З старосты ----------
     def add_post(self, author_id, group, kind, data, until, subgroup=None, created=None):
         if kind not in KINDS:
             raise ValueError(kind)
@@ -256,13 +280,13 @@ class Store:
         return cur.lastrowid
 
     def purge_posts(self, now):
-        """Удалить рассылки, срок которых прошёл (until раньше now 'YYYY-MM-DD HH:MM'). Возвращает их число."""
+        """Удалить объявления и Д/З старосты, срок которых прошёл (until раньше now 'YYYY-MM-DD HH:MM')."""
         n = self.db.execute("DELETE FROM group_posts WHERE until < ?", (now,)).rowcount
         self.db.commit()
         return n
 
     def delete_posts(self, group, ids):
-        """Староста отменил рассылки: удалить их у всей группы. Чужие группы не трогаем. Возвращает число удалённых."""
+        """Староста удалил объявления: у всей группы. Чужие группы не трогаем. Возвращает число удалённых."""
         ids = [int(i) for i in ids]
         if not ids:
             return 0
@@ -271,12 +295,8 @@ class Store:
         self.db.commit()
         return n
 
-    def post_ids(self):
-        """id всех рассылок в базе (чтобы забыть скрытые студентами рассылки, которых уже нет)."""
-        return {r[0] for r in self.db.execute("SELECT id FROM group_posts")}
-
     def posts(self, group, subgroup=None, after=None, kind=None):
-        """Рассылки группе, которые ещё актуальны (until >= after), для студента из подгруппы subgroup:
+        """Объявления и Д/З группе, которые ещё актуальны (until >= after), для студента из подгруппы subgroup:
         общие и своей подгруппы; если у студента подгруппа не указана — все."""
         q, args = "SELECT * FROM group_posts WHERE grp = ?", [group_key(group)]
         if after:
@@ -294,13 +314,33 @@ class Store:
                         "created": r["created"], **json.loads(r["data"])})
         return out
 
-    # ---------- личные данные ----------
-    def load_data(self, account_id):
-        row = self.db.execute("SELECT data FROM user_data WHERE account_id = ?", (account_id,)).fetchone()
-        return json.loads(row["data"]) if row else {}
+    # ---------- личные заметки и напоминания ----------
+    def add_note(self, account_id, text, fire_at=None, subject=None, class_at=None, created=None):
+        cur = self.db.execute("INSERT INTO notes (account_id, text, fire_at, subject, class_at, created) VALUES (?, ?, ?, ?, ?, ?)",
+                              (account_id, text, fire_at, subject, class_at, created or _now()))
+        self.db.commit()
+        return cur.lastrowid
 
-    def save_data(self, account_id, data):
-        self.db.execute("INSERT INTO user_data (account_id, data, updated) VALUES (?, ?, ?) "
-                        "ON CONFLICT(account_id) DO UPDATE SET data = excluded.data, updated = excluded.updated",
-                        (account_id, json.dumps(data, ensure_ascii=False), _now()))
+    def notes(self, account_id):
+        return [dict(r) for r in self.db.execute("SELECT * FROM notes WHERE account_id = ? ORDER BY id", (account_id,))]
+
+    def delete_notes(self, account_id, ids):
+        """Удалить свои записи (чужие не трогаем). Возвращает число удалённых."""
+        ids = [int(i) for i in ids]
+        if not ids:
+            return 0
+        n = self.db.execute(f"DELETE FROM notes WHERE account_id = ? AND id IN ({', '.join('?' * len(ids))})",
+                            (account_id, *ids)).rowcount
+        self.db.commit()
+        return n
+
+    def purge_notes(self, now):
+        """Удалить напоминания всех студентов, время которых прошло (раньше now 'YYYY-MM-DD HH:MM'): сайт к этому
+        моменту их уже отправил. Заметки без времени остаются. Возвращает число удалённых."""
+        n = self.db.execute("DELETE FROM notes WHERE fire_at IS NOT NULL AND fire_at < ?", (now,)).rowcount
+        self.db.commit()
+        return n
+
+    def set_brief_date(self, account_id, day):
+        self.db.execute("UPDATE accounts SET brief_date = ? WHERE id = ?", (day, account_id))
         self.db.commit()

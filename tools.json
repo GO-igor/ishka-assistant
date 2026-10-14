@@ -72,25 +72,26 @@
  {
   "type": "function",
   "function": {
-   "name": "add_homework",
-   "description": "Записать Д/З (хранится неделю, напомню перед парой).",
+   "name": "check_travel_time",
+   "description": "Успеваю ли я на следующую (или указанную) пару.",
    "parameters": {
     "type": "object",
     "properties": {
-     "subject": {
-      "type": "string"
-     },
-     "task": {
-      "type": "string"
-     },
-     "due": {
+     "from_building": {
       "type": "string",
-      "description": "next_class|tomorrow|monday..saturday|YYYY-MM-DD"
+      "description": "где студент сейчас"
+     },
+     "to_room": {
+      "type": "string",
+      "description": "если не следующая пара"
+     },
+     "to_building": {
+      "type": "string",
+      "description": "если не следующая пара"
      }
     },
     "required": [
-     "subject",
-     "task"
+     "from_building"
     ]
    }
   }
@@ -98,17 +99,14 @@
  {
   "type": "function",
   "function": {
-   "name": "list_homework",
-   "description": "Д/З, срок которых не прошёл (своё и выданное старостой).",
+   "name": "find_food",
+   "description": "Где перекусить рядом с корпусом пары.",
    "parameters": {
     "type": "object",
     "properties": {
-     "subject": {
-      "type": "string"
-     },
-     "due": {
+     "building": {
       "type": "string",
-      "description": "today|tomorrow|YYYY-MM-DD"
+      "description": "если нет — корпус текущей или последней пары"
      }
     }
    }
@@ -117,8 +115,73 @@
  {
   "type": "function",
   "function": {
-   "name": "create_reminder",
-   "description": "Напоминание: ЛИБО in_minutes/in_hours/in_days, ЛИБО at. Дату считает бэкенд.",
+   "name": "get_session",
+   "description": "Сколько дней до сессии, даты экзаменов и зачётов.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "subject": {
+      "type": "string"
+     }
+    }
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "get_events",
+   "description": "Мероприятия и хакатоны ТПУ.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "kind": {
+      "type": "string",
+      "enum": [
+       "хакатон",
+       "конференция",
+       "олимпиада",
+       "конкурс",
+       "мастер-класс"
+      ]
+     },
+     "period": {
+      "type": "string",
+      "enum": [
+       "week",
+       "month",
+       "all"
+      ],
+      "description": "week — 7 дней вперёд, month — 31 день (по умолчанию), all — все"
+     }
+    }
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "get_daily_brief",
+   "description": "Брифинг на день: пары, переходы, объявления старосты, все напоминания.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "day": {
+      "type": "string",
+      "description": "today|tomorrow|YYYY-MM-DD"
+     }
+    },
+    "required": [
+     "day"
+    ]
+   }
+  }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "add_note",
+   "description": "Заметка; со временем (ЛИБО in_minutes/in_hours/in_days, ЛИБО at) — напоминание. Время не названо — сначала спроси.",
    "parameters": {
     "type": "object",
     "properties": {
@@ -148,17 +211,20 @@
  {
   "type": "function",
   "function": {
-   "name": "add_note",
-   "description": "Заметка без времени.",
+   "name": "add_homework_reminder",
+   "description": "Напомнить о Д/З накануне ближайшей пары по предмету.",
    "parameters": {
     "type": "object",
     "properties": {
-     "text": {
+     "subject": {
+      "type": "string"
+     },
+     "task": {
       "type": "string"
      }
     },
     "required": [
-     "text"
+     "subject"
     ]
    }
   }
@@ -167,13 +233,10 @@
   "type": "function",
   "function": {
    "name": "list_notes",
-   "description": "Найти заметки и напоминания (свои и от старосты).",
+   "description": "Мои заметки и напоминания с номерами и объявления старосты.",
    "parameters": {
     "type": "object",
     "properties": {
-     "query": {
-      "type": "string"
-     },
      "kind": {
       "type": "string",
       "enum": [
@@ -190,21 +253,10 @@
   "type": "function",
   "function": {
    "name": "delete_items",
-   "description": "Удалить свои записи (рассылку старосты, мероприятие — скрыть у себя). Без numbers/query/all вернёт список с номерами.",
+   "description": "Удалить свои заметки и напоминания. Без numbers/query/all вернёт список с номерами.",
    "parameters": {
     "type": "object",
     "properties": {
-     "kind": {
-      "type": "string",
-      "enum": [
-       "note",
-       "reminder",
-       "homework",
-       "deadline",
-       "exam",
-       "event"
-      ]
-     },
      "numbers": {
       "type": "array",
       "items": {
@@ -219,92 +271,14 @@
      "all": {
       "type": "boolean",
       "description": "все; сначала вернёт confirm"
-     }
-    },
-    "required": [
-     "kind"
-    ]
-   }
-  }
- },
- {
-  "type": "function",
-  "function": {
-   "name": "get_daily_brief",
-   "description": "Брифинг на день: пары, переходы, Д/З, дедлайны, экзамены, новости от старосты.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "day": {
-      "type": "string",
-      "description": "today|tomorrow|YYYY-MM-DD"
-     }
-    },
-    "required": [
-     "day"
-    ]
-   }
-  }
- },
- {
-  "type": "function",
-  "function": {
-   "name": "set_daily_brief",
-   "description": "Вкл/выкл утренний брифинг или сменить время.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "enabled": {
-      "type": "boolean"
      },
-     "time": {
+     "kind": {
       "type": "string",
-      "description": "HH:MM, по умолчанию 07:30"
-     }
-    },
-    "required": [
-     "enabled"
-    ]
-   }
-  }
- },
- {
-  "type": "function",
-  "function": {
-   "name": "check_travel_time",
-   "description": "Успеваю ли я на следующую (или указанную) пару.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "from_building": {
-      "type": "string",
-      "description": "где студент сейчас"
-     },
-     "to_room": {
-      "type": "string",
-      "description": "если не следующая пара"
-     },
-     "to_building": {
-      "type": "string",
-      "description": "если не следующая пара"
-     }
-    },
-    "required": [
-     "from_building"
-    ]
-   }
-  }
- },
- {
-  "type": "function",
-  "function": {
-   "name": "get_exams",
-   "description": "Экзамены и зачёты: даты, аудитории, сколько дней осталось.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "subject": {
-      "type": "string"
+      "enum": [
+       "note",
+       "reminder"
+      ],
+      "description": "только заметки или только напоминания"
      }
     }
    }
@@ -313,203 +287,31 @@
  {
   "type": "function",
   "function": {
-   "name": "make_study_plan",
-   "description": "План повторения билетов по дням с напоминаниями.",
+   "name": "group_announce",
+   "description": "Только староста: объявление группе (или подгруппе).",
    "parameters": {
     "type": "object",
     "properties": {
-     "subject": {
+     "text": {
       "type": "string"
      },
-     "hours_per_day": {
-      "type": "integer"
-     },
-     "skip_days": {
+     "at": {
       "type": "string",
-      "description": "'sunday' или 'saturday,sunday'"
+      "description": "когда событие: YYYY-MM-DD|tomorrow|friday, можно с HH:MM"
      },
-     "tickets_total": {
-      "type": "integer",
-      "description": "если студент сказал"
-     }
-    },
-    "required": [
-     "subject"
-    ]
-   }
-  }
- },
- {
-  "type": "function",
-  "function": {
-   "name": "add_deadline",
-   "description": "Дедлайн лабы, курсовой и т.п. Напомню за 3 дня и за 1 день.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "title": {
-      "type": "string"
-     },
-     "subject": {
-      "type": "string"
-     },
-     "kind": {
-      "type": "string",
-      "enum": [
-       "лабораторная",
-       "курсовая",
-       "реферат",
-       "другое"
-      ]
-     },
-     "due": {
-      "type": "string",
-      "description": "YYYY-MM-DD|tomorrow|monday..saturday|next_class|in N days"
-     }
-    },
-    "required": [
-     "title",
-     "due"
-    ]
-   }
-  }
- },
- {
-  "type": "function",
-  "function": {
-   "name": "list_deadlines",
-   "description": "Дедлайны лаб и курсовых.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "subject": {
-      "type": "string"
-     },
-     "kind": {
-      "type": "string",
-      "enum": [
-       "лабораторная",
-       "курсовая",
-       "реферат",
-       "другое"
-      ]
-     }
-    }
-   }
-  }
- },
- {
-  "type": "function",
-  "function": {
-   "name": "find_food",
-   "description": "Где перекусить рядом с корпусом пары.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "building": {
-      "type": "string",
-      "description": "если нет — корпус текущей или последней пары"
-     }
-    }
-   }
-  }
- },
- {
-  "type": "function",
-  "function": {
-   "name": "add_exam",
-   "description": "Внести экзамен или зачёт со слов студента.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "subject": {
-      "type": "string"
-     },
-     "kind": {
-      "type": "string",
-      "enum": [
-       "экзамен",
-       "зачёт",
-       "дифзачёт"
-      ]
-     },
-     "date": {
-      "type": "string",
-      "description": "YYYY-MM-DD или '15 января'"
-     },
-     "time": {
-      "type": "string",
-      "description": "HH:MM"
-     },
-     "room": {
-      "type": "string"
-     },
-     "building": {
-      "type": "string"
-     }
-    },
-    "required": [
-     "subject",
-     "date"
-    ]
-   }
-  }
- },
- {
-  "type": "function",
-  "function": {
-   "name": "set_profile",
-   "description": "Настройки студента: подгруппа, преподаватель английского, курсы (А).",
-   "parameters": {
-    "type": "object",
-    "properties": {
      "subgroup": {
       "type": "integer",
       "enum": [
        1,
        2,
        3
-      ]
-     },
-     "english_teacher": {
-      "type": "string",
-      "description": "фамилия, как сказал студент"
-     },
-     "adaptation": {
-      "type": "boolean"
-     }
-    }
-   }
-  }
- },
- {
-  "type": "function",
-  "function": {
-   "name": "get_events",
-   "description": "Мероприятия и хакатоны: ближайшие по ТПУ и от старосты.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "kind": {
-      "type": "string",
-      "enum": [
-       "хакатон",
-       "конференция",
-       "олимпиада",
-       "конкурс",
-       "мастер-класс"
-      ]
-     },
-     "period": {
-      "type": "string",
-      "enum": [
-       "week",
-       "month",
-       "all"
       ],
-      "description": "week — 7 дней вперёд, month — 31 день (по умолчанию), all — все"
+      "description": "только этой подгруппе; без него — всей группе"
      }
-    }
+    },
+    "required": [
+     "text"
+    ]
    }
   }
  },
@@ -551,96 +353,16 @@
  {
   "type": "function",
   "function": {
-   "name": "group_add_event",
-   "description": "Только староста: разослать группе мероприятие.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "title": {
-      "type": "string"
-     },
-     "date": {
-      "type": "string",
-      "description": "YYYY-MM-DD|tomorrow|monday..sunday"
-     },
-     "time": {
-      "type": "string",
-      "description": "HH:MM"
-     },
-     "place": {
-      "type": "string"
-     },
-     "subgroup": {
-      "type": "integer",
-      "enum": [
-       1,
-       2,
-       3
-      ],
-      "description": "только этой подгруппе; без него — всей группе"
-     }
-    },
-    "required": [
-     "title",
-     "date"
-    ]
-   }
-  }
- },
- {
-  "type": "function",
-  "function": {
-   "name": "group_create_reminder",
-   "description": "Только староста: напоминание всей группе. ЛИБО in_minutes/in_hours/in_days, ЛИБО at.",
-   "parameters": {
-    "type": "object",
-    "properties": {
-     "text": {
-      "type": "string"
-     },
-     "in_minutes": {
-      "type": "integer"
-     },
-     "in_hours": {
-      "type": "integer"
-     },
-     "in_days": {
-      "type": "integer"
-     },
-     "at": {
-      "type": "string",
-      "description": "HH:MM|tomorrow HH:MM|monday HH:MM|YYYY-MM-DD HH:MM"
-     },
-     "subgroup": {
-      "type": "integer",
-      "enum": [
-       1,
-       2,
-       3
-      ],
-      "description": "только этой подгруппе; без него — всей группе"
-     }
-    },
-    "required": [
-     "text"
-    ]
-   }
-  }
- },
- {
-  "type": "function",
-  "function": {
    "name": "group_delete_post",
-   "description": "Только староста: отменить рассылку — пропадёт у всей группы. Без numbers/query/all вернёт список с номерами.",
+   "description": "Только староста: удалить объявление или Д/З у всей группы. Без numbers/query/all вернёт список с номерами.",
    "parameters": {
     "type": "object",
     "properties": {
      "kind": {
       "type": "string",
       "enum": [
-       "homework",
-       "event",
-       "reminder"
+       "announcement",
+       "homework"
       ]
      },
      "numbers": {
@@ -652,7 +374,7 @@
      },
      "query": {
       "type": "string",
-      "description": "слова из рассылки"
+      "description": "слова из объявления"
      },
      "all": {
       "type": "boolean",

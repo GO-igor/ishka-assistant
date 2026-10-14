@@ -145,9 +145,6 @@ CALENDAR = {"odd_week_monday": "2026-10-05",  # от неё чётность: ч
             # нерабочие дни (производственный календарь): пар нет
             "holidays": ["2026-11-04", "2026-12-31"] + [f"2027-01-{d:02d}" for d in range(1, 9)]}
 
-EXAMS_SEED = [  # дат пока нет: «примерно январь»; студенты вносят даты сами через add_exam
- {"subject": "python", "kind": "экзамен", "date": None}, {"subject": "inf", "kind": "экзамен", "date": None},
- {"subject": "math", "kind": "экзамен", "date": None}, {"subject": "matlog", "kind": "экзамен", "date": None}]
 
 if __name__ == "__main__":
     out = pathlib.Path(__file__).parent
@@ -161,5 +158,4 @@ if __name__ == "__main__":
     dump("walk.json", [{"a": a, "b": b, "minutes": m} for (a, b), m in WALK.items()])
     dump("food.json", FOOD)
     dump("calendar.json", CALENDAR)
-    dump("exams_seed.json", EXAMS_SEED)
     print(f"{len(lessons)} занятий: odd={sum(l['week']=='odd' for l in lessons)}, even={sum(l['week']=='even' for l in lessons)}")

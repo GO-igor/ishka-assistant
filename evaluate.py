@@ -9,7 +9,7 @@
 import argparse, collections, json, re, sys
 from unsloth import FastLanguageModel
 from prompt_format import CALL_THRESHOLD, answer_prefix, answer_text, parse_call, prompt_diff, tools_for  # как в chat.py
-from backend import _nums, _stems  # номера и слова для delete_items — как их понимает бэкенд
+from conversation import _nums, _stems  # номера и слова для delete_items — как их понимает бэкенд
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--model", default="out/lora")
@@ -113,7 +113,7 @@ lines = lines[: a.limit or len(lines)]
 
 def step2():
     """После каждого результата инструмента в датасете идёт ответ текстом (реже — следующий вызов,
-    например add_exam -> make_study_plan). Подаём диалог до результата включительно: system, вопрос,
+    например delete_items -> add_note, когда место освободилось). Подаём диалог до результата включительно: system, вопрос,
     вызов, результат (и предыдущие ходы, если они есть) — и смотрим, что модель делает дальше."""
     n = ok = texts = texts_ok = g_ok = 0
     per, hit, extra = collections.Counter(), collections.Counter(), collections.Counter()

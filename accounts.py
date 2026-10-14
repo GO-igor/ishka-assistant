@@ -6,13 +6,13 @@
     python accounts.py edit ivanov --role starosta            # и --group, --subgroup, --english, --name, --adaptation yes|no
     python accounts.py passwd ivanov                          # новый пароль
     python accounts.py remove ivanov
-    python accounts.py cleanup                                # удалить прошедшее (chat.py делает это сам при входе)
+    python accounts.py cleanup                                # удалить прошедшее: сайту раз в сутки
 Пароль спрашивается при вводе (не виден на экране); --password ПАРОЛЬ — задать сразу, --generate — придумать случайный.
 Таблица для import (CSV в UTF-8, первая строка — заголовок): login,password,role,group,subgroup,english,name,adaptation
 Разделитель — запятая или точка с запятой. Пустой password — пароль придумается сам; новые пароли допишутся
 в файл --out (раздай их студентам). Логины без учёта регистра: Ivanov и ivanov — один аккаунт."""
 import argparse, csv, getpass, io, os, sqlite3, unicodedata
-from backend import ENG_TEACHERS
+from campus import ENG_TEACHERS, english_teacher
 from store import ROLES, Store, login_key, new_password
 
 ap = argparse.ArgumentParser(description="Аккаунты Ишки", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
@@ -45,21 +45,19 @@ p = sub.add_parser("passwd", help="сменить пароль")
 p.add_argument("login")
 p.add_argument("--password")
 p.add_argument("--generate", action="store_true")
-sub.add_parser("cleanup", help="удалить прошедшее: старые рассылки старосты, Д/З, напоминания, дедлайны, экзамены")
+sub.add_parser("cleanup", help="удалить прошедшее: сработавшие напоминания, прошедшие объявления и Д/З старосты")
 p = sub.add_parser("remove", help="удалить аккаунт")
 p.add_argument("login")
 a = ap.parse_args()
 
 
 def teacher(name):
-    """«Аксёнова», «аксеновой» → «Аксёнова Н. В.» (как set_profile)."""
     if not name:
         return None
-    key = unicodedata.normalize("NFC", name).lower().replace("ё", "е")[:5]
-    hits = [t for t in ENG_TEACHERS if t.lower().replace("ё", "е").startswith(key)]
-    if len(hits) != 1:
+    full = english_teacher(name)
+    if not full:
         raise ValueError(f"преподаватель английского «{name}» не найден, варианты: {', '.join(ENG_TEACHERS)}")
-    return hits[0]
+    return full
 
 
 def ask_password(gen):
@@ -183,18 +181,10 @@ elif a.cmd == "passwd":
     st.set_password(a.login, a.password or ask_password(a.generate))
     print("Пароль изменён")
 elif a.cmd == "cleanup":
+    # напоминания удаляем, когда их время прошло: сайт отправляет их раньше (chat.py показывает их при входе сам)
     import datetime as dt
-    from backend import prune
-    now = dt.datetime.now()
-    posts = st.purge_posts(now.strftime("%Y-%m-%d %H:%M"))
-    live, mine = st.post_ids(), 0
-    for acc in st.accounts():
-        data = st.load_data(acc["id"])
-        n = prune(data, now, live)
-        if n:
-            st.save_data(acc["id"], data)
-            mine += n
-    print(f"Удалено: рассылок старосты {posts}, личных записей {mine}")
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    print(f"Удалено: объявлений и Д/З старосты {st.purge_posts(now)}, напоминаний {st.purge_notes(now)}")
 elif a.cmd == "remove":
     if not st.remove_account(a.login):
         raise SystemExit(f"Аккаунта «{a.login}» нет")

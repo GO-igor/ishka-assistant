@@ -1,4 +1,4 @@
-"""Диагностика модели на запущенном llama-server (окно 1 должно работать). Флаги — те же, что у chat.py:
+"""Диагностика модели на запущенном llama-server (окно 1 должно работать). Входа не нужно: профиль — флагами.
     python diag_server.py --subgroup 2 --english "Аксёнова Н. В."    # ~2–5 минут
     python diag_server.py --url http://localhost:8081
     python diag_server.py --eval 30         # ещё 30 диалогов из data/eval.jsonl, как evaluate.py (дольше)
@@ -6,9 +6,11 @@
 так же, как chat.py: по P(<tool_call>) на первом токене ответа. Для каждого вопроса печатает эту вероятность,
 самые вероятные первые токены и что ответил бы chat.py. Пришли весь вывод целиком.
 """
-import argparse, datetime as dt, json, os, sys, unicodedata, urllib.error, urllib.request
+import argparse, datetime as dt, json, os, sys, urllib.error, urllib.request
 from backend import Backend
+from campus import english_teacher
 from gen_dataset import system
+from store import Store
 from prompt_format import (HERE, TOOLS, tools_for, CALL_THRESHOLD, render, prompt_diff, parse_calls, answer_text,
                            call_msg, tool_msg, first_token_probs, tool_call_prob, pick_template)
 
@@ -29,13 +31,14 @@ N_PREDICT = 1024  # как в chat.py
 NAMES = {t["function"]["name"] for t in TOOLS}
 EVAL = [json.loads(l)["messages"] for l in open(os.path.join(HERE, "data", "eval.jsonl"), encoding="utf-8")]
 
-# Тот же контекст, что в chat.py: время, профиль через set_profile, system из gen_dataset
+# Тот же контекст, что в chat.py: время, профиль, system из gen_dataset; аккаунт — в базе в памяти
 now = dt.datetime.fromisoformat(a.now) if a.now else dt.datetime.now().replace(second=0, microsecond=0)
-backend = Backend(now, {})
-if a.subgroup or a.english or a.adaptation:
-    english = unicodedata.normalize("NFC", a.english) if a.english else None
-    if "error" in backend.set_profile(subgroup=a.subgroup, english_teacher=english, adaptation=a.adaptation):
-        raise SystemExit(f"Преподаватель английского «{a.english}» не найден")
+english = english_teacher(a.english) if a.english else None
+if a.english and not english:
+    raise SystemExit(f"Преподаватель английского «{a.english}» не найден")
+store = Store(":memory:")
+me = store.add_account("diag", None, "8К51", subgroup=a.subgroup, english_teacher=english, adaptation=a.adaptation)
+backend = Backend(now, store.profile(store.account(account_id=me)), store, me)
 SYSTEM = system(now, backend.profile)
 
 
@@ -209,10 +212,10 @@ if case:
 
 # ---------- 5. Вопросы из чата, с твоим профилем ----------
 LIVE = [("Кто ты?", None), ("Как тебя зовут?", None), ("привет", None), ("объясни рекурсию", None),
-        ("Какое расписание на завтра?", "get_schedule"), ("добавь экзамен по питону 15 января в 9:00", "add_exam")]
+        ("Какое расписание на завтра?", "get_schedule"), ("напомни завтра в 9:00 позвонить в деканат", "add_note")]
 # если модель на шаге 1 не вызвала нужный инструмент, для шага 2 берём такой вызов (как было в чате)
 EXPECTED_CALL = {"get_schedule": {"day": "tomorrow"},
-                 "add_exam": {"subject": "Основы Python", "kind": "экзамен", "date": "2027-01-15", "time": "09:00"}}
+                 "add_note": {"text": "Позвонить в деканат", "at": "tomorrow 09:00"}}
 print(f"\nШаг 1 — сразу на вопрос (вызов, только если P(<tool_call>) ≥ {CALL_THRESHOLD:.0%}, как в chat.py):")
 s1, s2, after = [], [], []
 for q, want in LIVE:
@@ -226,16 +229,12 @@ for q, want in LIVE:
 
 print("Шаг 2 — после результата инструмента (ждём ответ текстом):")
 for msgs, name, args in after:
-    try:
-        res = backend.call(name, args)
-    except Exception as e:  # аргументы не по схеме — так же, как chat.py
-        res = {"error": f"{type(e).__name__}: {e}"}
+    res = backend.call(name, args)
     hist = msgs + [call_msg([(name, args)]), tool_msg(name, res)]
-    want = {None, "make_study_plan"} if name == "add_exam" else None  # в датасете после add_exam бывает план
-    s2.append(probe(hist, want, f"«{msgs[1]['content']}» → {name} → результат")[0])
+    s2.append(probe(hist, None, f"«{msgs[1]['content']}» → {name} → результат")[0])
 
 print("Шаг 2 на диалогах из eval.jsonl:")
-for name in ("get_schedule", "list_notes", "add_exam"):
+for name in ("get_schedule", "list_notes", "add_note"):
     m = next((m for m in EVAL if len(m) > 4 and m[2].get("tool_calls") and m[4].get("content")
               and m[2]["tool_calls"][0]["function"]["name"] == name), None)
     if m:

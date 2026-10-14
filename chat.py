@@ -4,9 +4,11 @@
 chat.py сам собирает промпт ровно как при обучении (prompt_format.py, шаблон чата берёт из .gguf) и шлёт его
 в /completion, так что шаблон чата и разбор вызовов в llama.cpp не участвуют. Вызвать инструмент или ответить
 текстом, решает по P(<tool_call>) на первом токене ответа (порог CALL_THRESHOLD), а не жадным выбором токена.
-Запуск:  pip install jinja2 && python chat.py --subgroup 2 --english "Аксёнова Н. В."
-С аккаунтом (заводится в accounts.py; профиль, Д/З и заметки хранятся в db/ishka.sqlite, работают рассылки старосты):
-         python chat.py --login ivanov
+Запуск (без входа Ишка не работает; аккаунт заводится в accounts.py, профиль, заметки и напоминания хранятся
+в db/ishka.sqlite):
+    pip install jinja2 && python chat.py --login ivanov
+Сработавшие напоминания Ишка показывает при входе и перед каждым ответом, утренний брифинг — сам, при первом
+входе за день с 7:30 до 12:00 (или в это время, если чат открыт).
 Запретные фразы (db/blocklist.json, guard.py): на такой вопрос Ишка отвечает отказом из списка, ответ модели или
 вызов инструмента с такой фразой не выводится. Список можно править, не закрывая чат.
 Другие серверы (OpenAI-совместимый API, шаблон и вызовы разбирает сервер):
@@ -16,21 +18,20 @@ chat.py сам собирает промпт ровно как при обуче
 """
 import argparse, datetime as dt, getpass, json, os, unicodedata, urllib.error, urllib.request
 from backend import Backend
+from conversation import Conversation
 from gen_dataset import system
 from guard import Guard
 from prompt_format import (TOOLS, tools_for, BROKEN, CALL_THRESHOLD, render, answer_prefix, parse_calls, answer_text,
                            call_msg, tool_msg, first_token_probs, tool_call_prob, pick_template)
+from store import DEFAULT_DB, Store
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--url", default="http://localhost:8080", help="адрес сервера (для --api openai — с /v1)")
 ap.add_argument("--api", choices=("completion", "openai"), default="completion",
                 help="completion — llama-server, промпт как при обучении; openai — Ollama, vLLM и т. п.")
 ap.add_argument("--name", default="ishka", help="имя модели (только для --api openai)")
-ap.add_argument("--subgroup", type=int)
-ap.add_argument("--english")
-ap.add_argument("--adaptation", action="store_true")
-ap.add_argument("--now", help="подменить текущее время: '2026-10-06 12:10'")
-ap.add_argument("--login", help="войти в аккаунт (пароль спросит); профиль берётся из аккаунта")
+ap.add_argument("--now", help="подменить текущее время: '2026-10-06 12:10' (база тогда не меняется: прошедшее не удаляется)")
+ap.add_argument("--login", help="логин (пароль спросит); без него спросит и логин")
 ap.add_argument("--db", help="база аккаунтов (по умолчанию db/ishka.sqlite)")
 ap.add_argument("--debug", action="store_true", help="печатать сырой ответ модели")
 a = ap.parse_args()
@@ -39,35 +40,24 @@ now = dt.datetime.fromisoformat(a.now) if a.now else dt.datetime.now().replace(s
 guard = Guard()  # запретные фразы из db/blocklist.json: в вопросе, в ответе и в вызовах инструментов
 if guard.error:
     raise SystemExit(f"Не читается список запретных фраз {guard.error.split(';')[0]}. Исправь файл и запусти снова.")
-if a.login:
-    from store import DEFAULT_DB, Store
-    path = a.db or os.environ.get("ISHKA_DB") or str(DEFAULT_DB)
-    if not os.path.exists(path):
-        raise SystemExit(f"Базы аккаунтов {path} нет: сначала заведи аккаунт, например\n"
-                         f"  python accounts.py add {a.login} --group 8К51")
-    store = Store(path)
-    password = os.environ.get("ISHKA_PASSWORD")  # для проверок без ввода руками
-    if password is None:
-        password = getpass.getpass("пароль: ")
-    acc = store.check_login(unicodedata.normalize("NFC", a.login), password)
-    if not acc:
-        raise SystemExit("Неверный логин или пароль")
-    if a.subgroup or a.english or a.adaptation:
-        print("  [профиль берётся из аккаунта: --subgroup, --english и --adaptation не нужны]")
-    backend = Backend(now, store.profile(acc), store, acc["id"])
-    if not a.now:  # прошедшее удаляем только по настоящим часам: с --now (проверка) база не трогается
-        backend.cleanup()
-        store.purge_posts(now.strftime("%Y-%m-%d %H:%M"))
-    print(f"Привет, {acc['name'] or acc['login']}! Группа {acc['grp']}" + (
-        ", ты староста: можешь отправлять группе Д/З, мероприятия и напоминания." if acc["role"] == "starosta" else "."))
-else:
-    backend = Backend(now, {})
-if not a.login and (a.subgroup or a.english or a.adaptation):
-    # через set_profile, как в диалоге: «Аксёнова» или «Аксенова» превратится в полное ФИО из расписания
-    english = unicodedata.normalize("NFC", a.english) if a.english else None  # «ё» из терминала бывает двумя символами
-    r = backend.set_profile(subgroup=a.subgroup, english_teacher=english, adaptation=a.adaptation)
-    if "error" in r:
-        raise SystemExit(f"Преподаватель английского не найден, варианты: {', '.join(r.get('options', []))}")
+path = a.db or os.environ.get("ISHKA_DB") or str(DEFAULT_DB)
+if not os.path.exists(path):
+    raise SystemExit(f"Базы аккаунтов {path} нет: сначала заведи аккаунт, например\n"
+                     f"  python accounts.py add {a.login or 'ivanov'} --group 8К51 --subgroup 2 --english Аксёнова")
+store = Store(path)
+login = a.login or input("логин: ")
+password = os.environ.get("ISHKA_PASSWORD")  # для проверок без ввода руками
+if password is None:
+    password = getpass.getpass("пароль: ")
+acc = store.check_login(unicodedata.normalize("NFC", login), password)
+if not acc:
+    raise SystemExit("Неверный логин или пароль")
+conv = Conversation()  # номера показанных списков и «удалить все?» — на весь разговор
+backend = Backend(now, store.profile(acc), store, acc["id"], conv)
+if not a.now:  # прошедшее удаляем только по настоящим часам: с --now (проверка) база не трогается
+    store.purge_posts(now.strftime("%Y-%m-%d %H:%M"))
+print(f"Привет, {acc['name'] or acc['login']}! Группа {acc['grp']}" + (
+    ", ты староста: можешь отправлять группе объявления и Д/З." if acc["role"] == "starosta" else "."))
 NAMES = {t["function"]["name"] for t in TOOLS}
 msgs = [system(now, backend.profile)]  # история в формате обучения (как в gen_dataset.py)
 MAX_ROUNDS = 4    # вызовов инструментов подряд на один вопрос; в датасете больше 4 не бывает
@@ -271,7 +261,6 @@ def run_tools(calls):
         results.append(tool_msg(name, res))
     msgs.append(call_msg(calls))
     msgs.extend(results)
-    msgs[0] = system(now, backend.profile)  # профиль мог поменяться через set_profile
 
 
 def answer():
@@ -313,9 +302,84 @@ def say_blocked(hit, why):
         print(f"  [{why}: «{hit['phrase']}» из группы «{hit['group']}»]")
 
 
+def turn(q):
+    """Один вопрос студента (или «[авто] утренний брифинг»): ответ модели, отказ или «не получилось»."""
+    msgs.append({"role": "user", "content": q})
+    forget_old(KEEP_TURNS)
+    last_raw[0] = ""
+    snap = conv.state()  # номера списков и «удалить все?»: если ход уберём из истории, вернём как было
+    conv.new_turn()
+    try:
+        text, err = answer(), None
+    except (ContextOverflow, ServerError) as e:  # даже один вопрос не влез в контекст или сервер недоступен
+        text, err = None, e
+    except KeyboardInterrupt:  # Ctrl+C во время ответа: вопрос отменяется, чат продолжается
+        text, err = None, "прервано"
+        print("  [прервано]")
+    except Blocked as e:
+        u = max(i for i, x in enumerate(msgs) if x["role"] == "user")
+        if any(x["role"] == "tool" for x in msgs[u:]):
+            # инструменты уже сработали (например, объявление ушло): ход оставляем, ответ модели заменяем отказом
+            msgs.append({"role": "assistant", "content": e.hit["answer"] or guard.answer})
+            # списков из этого хода студент не видел: «удали 2» — про прежний список; но сообщение было, и «да» на
+            # «удалить все?» из позапрошлого сообщения уже не подтверждает
+            conv.restore(dict(snap, turn=conv.turn))
+        else:  # ход целиком убираем из истории, чтобы модель не продолжила эту тему
+            del msgs[u:]
+            conv.restore(snap)
+        say_blocked(e.hit, "запретная фраза в ответе модели")
+        return
+    if text:
+        msgs.append({"role": "assistant", "content": text})
+        print("Ишка>", text)
+        return
+    # Неудачный ход в историю не кладём: модель не должна видеть «не получилось» как образец ответа
+    del msgs[max(i for i, x in enumerate(msgs) if x["role"] == "user"):]
+    conv.restore(snap)
+    print("Ишка>", FALLBACK)
+    if isinstance(err, Exception):
+        print(f"  [ошибка сервера: {err}]")
+    elif not err:
+        print(f"  [сырой ответ модели: {last_raw[0][:300]!r}]" if last_raw[0].strip() else "  [модель вернула пустой ответ]")
+
+
+BRIEF_FROM, BRIEF_TO = dt.time(7, 30), dt.time(12, 0)  # утренний брифинг сам — при первом входе за день в это время
+brief_day = [acc.get("brief_date")]
+told = set()  # с --now напоминания не удаляются: каждое показываем один раз
+
+
+def reminder_line(r):
+    if r.get("subject"):
+        c = dt.datetime.fromisoformat(r["class_at"])
+        what = f"Д/З к паре «{r['subject']}» ({c:%d.%m} в {c:%H:%M})"
+        return f"⏰ Напоминаю: {what}" + (f": {r['text']}" if r["text"] else "")
+    return f"⏰ Напоминаю: {r['text']}"
+
+
+def tick():
+    """Перед каждым вопросом: часы, сработавшие напоминания и утренний брифинг."""
+    global now
+    if not a.now:
+        now = dt.datetime.now().replace(second=0, microsecond=0)
+        backend.now = now
+        msgs[0] = system(now, backend.profile)
+    for r in backend.due_reminders(delete=not a.now):
+        key = json.dumps(r, sort_keys=True)
+        if key not in told:
+            told.add(key)
+            print(reminder_line(r))
+    today = now.date().isoformat()
+    if BRIEF_FROM <= now.time() < BRIEF_TO and brief_day[0] != today:
+        brief_day[0] = today
+        if not a.now:
+            store.set_brief_date(acc["id"], today)
+        turn("[авто] утренний брифинг")
+
+
 guard_error = [None]  # о сломанном файле при перечитывании говорим один раз
 
 
+tick()
 while True:
     try:
         q = unicodedata.normalize("NFC", input("ты> "))
@@ -329,41 +393,6 @@ while True:
     if hit:  # модели вопрос не показываем и в историю не кладём
         say_blocked(hit, "запретная фраза в вопросе")
         continue
-    msgs.append({"role": "user", "content": q})
-    forget_old(KEEP_TURNS)
-    last_raw[0] = ""
-    conv = backend.conversation()  # номера списков и «удалить все?»: если ход уберём из истории, вернём как было
-    backend.new_turn()
-    try:
-        text, err = answer(), None
-    except (ContextOverflow, ServerError) as e:  # даже один вопрос не влез в контекст или сервер недоступен
-        text, err = None, e
-    except KeyboardInterrupt:  # Ctrl+C во время ответа: вопрос отменяется, чат продолжается
-        text, err = None, "прервано"
-        print("  [прервано]")
-    except Blocked as e:
-        u = max(i for i, x in enumerate(msgs) if x["role"] == "user")
-        if any(x["role"] == "tool" for x in msgs[u:]):
-            # инструменты уже сработали (например, рассылка ушла): ход оставляем, ответ модели заменяем отказом
-            msgs.append({"role": "assistant", "content": e.hit["answer"] or guard.answer})
-            # списков из этого хода студент не видел: «удали 2» — про прежний список; но сообщение было, и «да» на
-            # «удалить все?» из позапрошлого сообщения уже не подтверждает
-            backend.restore(dict(conv, turn=backend.turn))
-        else:  # ход целиком убираем из истории, чтобы модель не продолжила эту тему
-            del msgs[u:]
-            backend.restore(conv)
-        say_blocked(e.hit, "запретная фраза в ответе модели")
-        continue
-    if text:
-        msgs.append({"role": "assistant", "content": text})
-        print("Ишка>", text)
-    else:
-        # Неудачный ход в историю не кладём: модель не должна видеть «не получилось» как образец ответа
-        del msgs[max(i for i, x in enumerate(msgs) if x["role"] == "user"):]
-        backend.restore(conv)
-        print("Ишка>", FALLBACK)
-        if isinstance(err, Exception):
-            print(f"  [ошибка сервера: {err}]")
-        elif not err:
-            print(f"  [сырой ответ модели: {last_raw[0][:300]!r}]" if last_raw[0].strip()
-                  else "  [модель вернула пустой ответ]")
+    tick()
+    turn(q)
+    tick()
