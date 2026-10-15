@@ -102,7 +102,7 @@ def guest():
     st = Store(":memory:")
     acc = st.account(account_id=st.add_account("гость", None, "гость"))
     acc.pop("pw_hash")
-    return st, acc
+    return st, acc | {"guest": True}  # profile() пометит его: в промпте «не вошёл в аккаунт»
 
 
 def _now():
@@ -262,7 +262,7 @@ class Store:
 
     def profile(self, acc):
         """Профиль для Backend: подгруппа, преподаватель английского, курсы (А), группа и роль."""
-        p = {"group": acc["grp"], "role": acc["role"]}
+        p = {"group": acc["grp"], "role": acc["role"]} | ({"guest": True} if acc.get("guest") else {})
         if acc.get("subgroup"):
             p["subgroup"] = acc["subgroup"]
         if acc.get("english_teacher"):

@@ -145,7 +145,7 @@ vllm serve out/merged --served-model-name ishka --enable-auto-tool-choice --tool
 
 ```bash
 pip install jinja2
-python accounts.py add ivanov --group 8К51 --subgroup 2 --english Аксёнова  # один раз: без аккаунта Ишка не работает
+python accounts.py add ivanov --group 8К51 --subgroup 2 --english Аксёнова  # один раз; без аккаунта — python chat.py --guest (Ишка не знает группу и преподавателей)
 python chat.py --login ivanov                                                # к llama.cpp на :8080, пароль спросит
 python chat.py --login ivanov --now "2026-10-06 12:10"                       # подменить время для проверки
 python diag_server.py --subgroup 2 --english Аксёнова                        # проверка модели на llama-server (входа не нужно, профиль флагами)
@@ -190,7 +190,9 @@ python chat.py --login petrova                            # профиль, за
 без него «удали 2» в следующем сообщении получит список заново. Сработавшие напоминания отдаёт `backend.due_reminders()` (и удаляет их).
 Прошедшие объявления и Д/З старосты `chat.py` удаляет при входе, а у всех сразу прошедшее удаляет `python accounts.py cleanup`
 (`store.purge_posts(now)` и `store.purge_notes(now)`; в планировщик раз в сутки).
-Без входа: `store, acc = store.guest()` (база в памяти на один разговор) и тот же `Backend`; покажи студенту `store.GUEST_NOTICE`.
+Без входа: `from store import guest, GUEST_NOTICE`, `st, acc = guest()` и тот же `Backend(now, st.profile(acc), st, acc["id"], conv)`;
+покажи студенту `GUEST_NOTICE`. `st` — база в памяти: храни её в сессии весь разговор, новая `guest()` на каждое сообщение потеряет заметки.
+В промпте у гостя «Профиль студента: не вошёл в аккаунт» — модель предлагает войти, а не дописать профиль.
 
 **Удаление и лимиты.** Заметки и напоминания Ишка показывает одним списком с номерами (`list_notes`: сначала напоминания по времени,
 потом заметки), удаляет `delete_items` по номеру из последнего показанного списка («удали 2»; номера после удаления не сдвигаются),

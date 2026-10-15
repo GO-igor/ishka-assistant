@@ -40,6 +40,8 @@ def rand_profile():
 
 
 def profile_text(p):
+    if p.get("guest"):  # chat.py --guest: группа и преподаватели неизвестны
+        return "не вошёл в аккаунт"
     if not any(k in p for k in ("subgroup", "english_teacher", "adaptation")):
         s = "не заполнен"
     else:
@@ -127,7 +129,10 @@ def cat_schedule(split):
         ans = f"{head}:\n{lines}"
         if any(l.get("overlap") for l in ls):
             ans += "\n\nДве пары в одно время — уточни у старосты, на какую идти."
-        if "note" in res or "note_subgroup" in res:
+        if ("note" in res or "note_subgroup" in res) and p.get("guest"):
+            ans += ("\n\nЯ показал пары для всех подгрупп: ты не вошёл в аккаунт, поэтому я не знаю твою подгруппу и "
+                    "преподавателя английского. Войди — и буду показывать только твои пары.")
+        elif "note" in res or "note_subgroup" in res:
             ans += ("\n\nЯ показал пары для всех групп: в твоём аккаунте не указаны подгруппа или преподаватель английского. "
                     "Попроси того, кто выдавал аккаунт, дописать их — тогда буду показывать только твои пары.")
         elif len({l.get('building') for l in ls if l.get('building')}) > 1:
@@ -981,10 +986,31 @@ CHAT = [
 ]
 
 
+GUEST_PROFILE_Q = ["я во второй подгруппе", "поменяй мне подгруппу на 3", "у меня английский у Ростовцевой",
+                   "запомни, что я в первой подгруппе", "я в 3 подгруппе, учти", "мой препод по англу — Пичугова",
+                   "я из второй подгруппы", "англ у меня ведёт Аксёнова"]
+GUEST_PROFILE_A = ["Ты не вошёл в аккаунт, поэтому подгруппу и преподавателя английского я не знаю и в чате не запоминаю 🙂 "
+                   "Войди в аккаунт — там они записаны, и я буду показывать только твои пары.",
+                   "Без входа я не знаю твою группу и преподавателей 🙂 Войди в аккаунт: подгруппа и английский берутся оттуда."]
+
+
+def cat_chat_guest(split):
+    """Без входа (chat.py --guest): профиль не запоминаем в чате, а предлагаем войти."""
+    now = rand_now()
+    return [system(now, {"guest": True}), {"role": "user", "content": pick(split_phr(GUEST_PROFILE_Q, split))},
+            {"role": "assistant", "content": pick(GUEST_PROFILE_A)}]
+
+
+def guest_profile():
+    return {"guest": True}
+
+
 def cat_chat(split):
     qs, answers = pick(CHAT)
     q = pick(qs[:-1] if split == "train" and len(qs) > 1 else qs[-1:])
     now, p = rand_now(), rand_profile()
+    if p.get("guest") and qs[0] == GUEST_PROFILE_Q[0]:  # без входа профиль не из аккаунта
+        answers = GUEST_PROFILE_A
     return [system(now, p), {"role": "user", "content": q}, {"role": "assistant", "content": pick(answers)}]
 
 
@@ -2373,6 +2399,16 @@ if __name__ == "__main__":
         rnd = random.Random(6060 if split == "train" else 6061)
         for cat, n in ((cat_hw_reminder_ask, 40), (cat_note_day_only, 50), (lambda sp: cat_session(sp, mixed=True), 30)):
             data[split] += build(n if split == "train" else 5, split, [(cat, 1)])
+        rnd.shuffle(data[split])
+        # 7) Без входа (chat.py --guest): в промпте «не вошёл в аккаунт» — те же инструменты, но пары для всех подгрупп
+        #    и «войди в аккаунт» вместо «попроси того, кто выдавал аккаунт». Свой генератор; rand_profile подменяем
+        rnd, real_profile = random.Random(7070 if split == "train" else 7071), rand_profile
+        rand_profile = guest_profile
+        cats = ((cat_schedule, 30, 4), (cat_chat_guest, 8, 3), (cat_room, 8, 0), (cat_teacher, 8, 0), (cat_food, 5, 0),
+                (cat_travel, 5, 0), (cat_note_timed, 8, 2), (cat_note_clarify, 6, 0), (cat_hw_reminder, 6, 1), (cat_chat, 6, 0))
+        for cat, n_train, n_eval in cats:
+            data[split] += build(n_train if split == "train" else n_eval, split, [(cat, 1)])
+        rand_profile = real_profile
         rnd.shuffle(data[split])
         rnd = main_rnd
         with open(root / f"{split}.jsonl", "w", encoding="utf-8") as f:
