@@ -71,7 +71,7 @@ def check_args(spec, args):
         t = p.get("type")
         if t == "integer":
             if isinstance(v, str) and re.fullmatch(r"\s*-?[0-9]{1,9}\s*", v):
-                v = int(v)
+                v = int(v.strip())
             elif isinstance(v, float) and v.is_integer() and abs(v) < 1e9:
                 v = int(v)
             if isinstance(v, bool) or not isinstance(v, int):

@@ -196,7 +196,7 @@ def _nums(x):
     out = []
     for v in x:
         if isinstance(v, str) and re.fullmatch(r"\s*-?\d{1,9}\s*", v):
-            v = int(v)
+            v = int(v.strip())
         if isinstance(v, bool) or not isinstance(v, (int, float)) or (isinstance(v, float) and not v.is_integer()):
             return None  # is_integer: у inf и NaN — False
         if int(v) not in out:

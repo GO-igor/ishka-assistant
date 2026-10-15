@@ -554,7 +554,7 @@ def cat_note_clarify(split):
     return msgs + [tc("add_note", args), tr("add_note", res), {"role": "assistant", "content": note_answer(cap(what))}]
 
 
-DAY_ONLY_PHR = ["напомни {d} {x}", "{d} напомни {x}", "напомни мне {x} {d}", "не дай забыть {x} {d}", "можешь {d} напомнить {x}?",
+DAY_ONLY_PHR = ["напомни {d} {x}", "{d} напомни {x}", "напомни мне {x} {d}", "не дай забыть {x} {d}", "напомни {d}, надо {x}",
                 "поставь напоминание {d}: {x}", "кинь напоминалку {d} — {x}", "{d} надо {x}, напомни", "напомни {x} {d} пж",
                 "запиши и напомни {d}: {x}"]
 ASK_HOUR = ["Во сколько напомнить {d}? 🙂", "Ок! А во сколько {d}? Например «в 9» или «в 18:30».", "{D} — понял. Во сколько напомнить?",
@@ -562,8 +562,7 @@ ASK_HOUR = ["Во сколько напомнить {d}? 🙂", "Ок! А во �
 
 
 def cat_note_day_only(split):
-    """День назван, а час нет («напомни в пятницу сдать отчёт»): Ишка спрашивает время. Иногда модель сначала зовёт
-    add_note без часа, получает bad_time — и тоже спрашивает, а не сохраняет просто заметку."""
+    """День назван, а час нет («напомни в пятницу сдать отчёт»): Ишка сначала спрашивает время, add_note — только с часом."""
     now, p = rand_now((7, 21)), rand_profile()
     b = account_backend(now, p)
     what = pick(REM_TASKS)
@@ -582,9 +581,6 @@ def cat_note_day_only(split):
     else:
         t = pick([f"в {h}", f"в {h}:00", f"{h}:00", f"часов в {h}"] + ([f"в {h} утра"] if h < 12 else [f"в {h - 12} вечера"] if h >= 17 else []))
     msgs = [system(now, p), {"role": "user", "content": pick(split_phr(DAY_ONLY_PHR, split)).format(d=spoken, x=what)}]
-    if rnd.random() < 0.2:
-        bad = {"text": cap(what), "at": day}
-        msgs += [tc("add_note", bad), tr("add_note", b.add_note(**bad))]
     msgs += [{"role": "assistant", "content": pick(ASK_HOUR).format(d=spoken, D=cap(spoken))}, {"role": "user", "content": t}]
     args = {"text": cap(what), "at": f"{day} {h:02d}:{m:02d}"}
     res = b.add_note(**args)
@@ -825,7 +821,7 @@ def cat_session(split, mixed=False):
         code, kind = e0["subject"], e0["kind"]
         alias = sub_alias(code)
         q = pick(split_phr(["когда {k} по {sd}?", "{k} по {sd} когда", "{s} — {k} какого числа?", "через сколько дней {k} по {sd}",
-                            "когда сдаём {s}?", "{k} по {sd} уже назначили?", "когда {k} по {sd}", "дата {kg} по {sd}?"],
+                            "когда сдаём {s}?", "{k} по {sd} — когда сдавать?", "есть уже число для {kg} по {sd}?", "дата {kg} по {sd}?"],
                            split)).format(k=kind, kg=EXAM_GEN[kind], s=alias, sd=sdat(alias))
         args = {"subject": alias}
     elif not mixed and rnd.random() < 0.4:
