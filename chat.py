@@ -362,6 +362,7 @@ BRIEF_FROM, BRIEF_TO = dt.time(7, 30), dt.time(12, 0)  # утренний бри
 brief_day = [acc.get("brief_date")]
 brief_retry = [0, None]  # брифинг не получился (сервер не ответил): сколько раз и когда пробовать снова (через 5 минут, до 3 раз)
 told = set()  # с --now напоминания не удаляются: каждое показываем один раз
+TG_GRACE = 2  # минут: у кого подключён Telegram, напоминание сначала ждёт бота (notify.py), потом его покажет чат
 
 
 def tick():
@@ -373,12 +374,21 @@ def tick():
         now = dt.datetime.now().replace(second=0, microsecond=0)
         backend.now = now
         msgs[0] = system(now, backend.profile)
-    for r in backend.due_reminders(delete=not a.now):
+    cur = None if a.now else store.account(account_id=acc["id"])  # notify.py мог отметить брифинг или подключить Telegram
+    due = backend.due_reminders(delete=False)
+    if cur and cur.get("tg_chat_id"):  # напоминание пришлёт бот; чат покажет его, только если бот не успел (не запущен)
+        late = (now - dt.timedelta(minutes=TG_GRACE)).strftime("%Y-%m-%d %H:%M")
+        due = [r for r in due if r["fire_at"] <= late]
+    if due and not a.now:
+        store.delete_notes(acc["id"], [r["id"] for r in due])
+    for r in due:
         key = json.dumps(r, sort_keys=True)
         if key not in told:
             told.add(key)
             print(reminder_line(r))
             printed = True
+    if cur and (cur.get("brief_date") or "") > (brief_day[0] or ""):
+        brief_day[0] = cur["brief_date"]
     today = now.date().isoformat()
     if BRIEF_FROM <= now.time() < BRIEF_TO and brief_day[0] != today and (brief_retry[1] is None or now >= brief_retry[1]):
         ok = turn("[авто] утренний брифинг")

@@ -177,10 +177,12 @@ elif a.cmd == "edit":
         raise SystemExit(f"Аккаунта «{a.login}» нет")
     print("Готово")
 elif a.cmd == "passwd":
-    if not st.account(login=a.login):
+    acc = st.account(login=a.login)
+    if not acc:
         raise SystemExit(f"Аккаунта «{a.login}» нет")
     st.set_password(a.login, a.password or ask_password(a.generate))
-    print("Пароль изменён")
+    print("Пароль изменён" + (". Telegram этого аккаунта отключён: снова подключиться — /login логин пароль боту"
+                              if acc.get("tg_chat_id") else ""))
 elif a.cmd == "cleanup":
     # напоминания удаляем, когда их время прошло: сайт отправляет их раньше (chat.py показывает их при входе сам)
     import datetime as dt

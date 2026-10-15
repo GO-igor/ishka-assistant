@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS group_posts (    -- объявления и Д/З о�
     created TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS group_posts_grp ON group_posts (grp, until);
+"""
+# создаётся в _telegram_columns: notify.py помнит, кому что уже отправил
+POST_SENT = """
 CREATE TABLE IF NOT EXISTS post_sent (      -- кому бот уже отправил объявление или Д/З старосты (не слать дважды)
     post_id INTEGER NOT NULL REFERENCES group_posts(id) ON DELETE CASCADE,
     account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -187,15 +190,24 @@ class Store:
             self.db.execute("PRAGMA foreign_keys = ON")
 
     def _telegram_columns(self):
-        """База до 15.10.2026: без Telegram (tg_chat_id, tg_since)."""
+        """База до 15.10.2026: без Telegram (tg_chat_id, tg_since и таблица post_sent). Не в SCHEMA, чтобы старую базу,
+        открытую только для чтения или занятую другим процессом, можно было читать, как раньше."""
         cols = {r[1] for r in self.db.execute("PRAGMA table_info(accounts)")}
+        tables = {r[0] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        indexes = {r[0] for r in self.db.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+        self.telegram = {"tg_chat_id", "tg_since"} <= cols  # False — старую базу пока не удалось перенести (занята)
+        if self.telegram and "post_sent" in tables and "accounts_tg" in indexes:
+            return
         try:
             for c, t in (("tg_chat_id", "INTEGER"), ("tg_since", "TEXT")):
                 if c not in cols:
                     self.db.execute(f"ALTER TABLE accounts ADD COLUMN {c} {t}")
             self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS accounts_tg ON accounts (tg_chat_id)")
+            self.db.execute(POST_SENT)
             self.db.commit()
+            self.telegram = True
         except sqlite3.OperationalError as e:
+            self.db.rollback()
             if "readonly" not in str(e) and "locked" not in str(e):
                 raise
 
@@ -248,7 +260,7 @@ class Store:
     def accounts(self):
         return [dict(r) for r in self.db.execute(
             "SELECT id, login, role, name, grp, subgroup, english_teacher, adaptation, pw_hash != '!' AS can_login, "
-            "tg_chat_id IS NOT NULL AS telegram "
+            f"{'tg_chat_id IS NOT NULL' if self.telegram else '0'} AS telegram "
             "FROM accounts ORDER BY grp, role = 'starosta' DESC, login")]
 
     def update_account(self, login, **fields):
@@ -276,7 +288,8 @@ class Store:
     def set_password(self, login, password):
         """Новый пароль (или '!' — вход закрыт). Telegram отключается: если старый пароль узнал кто-то чужой,
         уведомления ему больше не придут; студент подключится заново через /login."""
-        cur = self.db.execute("UPDATE accounts SET pw_hash = ?, tg_chat_id = NULL, tg_since = NULL WHERE login = ?",
+        tg = ", tg_chat_id = NULL, tg_since = NULL" if self.telegram else ""
+        cur = self.db.execute(f"UPDATE accounts SET pw_hash = ?{tg} WHERE login = ?",
                               (hash_password(password) if password else "!", login_key(login)))
         self.db.commit()
         return cur.rowcount > 0
