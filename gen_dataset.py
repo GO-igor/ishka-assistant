@@ -2,7 +2,7 @@
 python gen_dataset.py  ->  data/train.jsonl, data/eval.jsonl
 Формулировки делятся на train и eval (последние 2 в каждом списке — только eval), чтобы eval проверял обобщение.
 Перед обучением ответы стоит перефразировать большой LLM и выборочно проверить руками."""
-import datetime as dt, json, random, pathlib
+import datetime as dt, json, random, pathlib, re
 import paraphrase, prompt_format
 from backend import Backend, SUBJECTS, WD_RU, WEEKDAYS, HOLIDAYS, EVENT_KINDS, resolve_subject
 from conversation import _matches, _stems
@@ -986,9 +986,9 @@ CHAT = [
 ]
 
 
-GUEST_PROFILE_Q = ["я во второй подгруппе", "поменяй мне подгруппу на 3", "у меня английский у Ростовцевой",
-                   "запомни, что я в первой подгруппе", "я в 3 подгруппе, учти", "мой препод по англу — Пичугова",
-                   "я из второй подгруппы", "англ у меня ведёт Аксёнова"]
+GUEST_PROFILE_Q = ["я во второй подгруппе", "поменяй мне подгруппу на 3", "запомни, что я в первой подгруппе",
+                   "я в 3 подгруппе, учти", "мой препод по англу — Пичугова", "я из второй подгруппы",
+                   "у меня английский у Ростовцевой", "англ у меня ведёт Аксёнова"]  # последние две (eval) — как в CHAT
 GUEST_PROFILE_A = ["Ты не вошёл в аккаунт, поэтому подгруппу и преподавателя английского я не знаю и в чате не запоминаю 🙂 "
                    "Войди в аккаунт — там они записаны, и я буду показывать только твои пары.",
                    "Без входа я не знаю твою группу и преподавателей 🙂 Войди в аккаунт: подгруппа и английский берутся оттуда."]
@@ -1003,6 +1003,28 @@ def cat_chat_guest(split):
 
 def guest_profile():
     return {"guest": True}
+
+
+GUEST_REPLAY = [{"subgroup": s, "english_teacher": e, "adaptation": False} for s in (1, 2, 3) for e in ENG]
+
+
+def same_for_everyone(cat):
+    """Без входа подгруппа и английский неизвестны: дорогу, перекус и напоминание о Д/З берём, только если ответ
+    инструмента одинаков при любом профиле (иначе модель выдала бы чужую пару за пару гостя)."""
+    def run(split):
+        m = cat(split)
+        if m is None:
+            return None
+        now = dt.datetime.strptime(re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", m[0]["content"]).group(), "%Y-%m-%d %H:%M")
+        for i, x in enumerate(m):
+            for t in x.get("tool_calls") or []:
+                name, args = t["function"]["name"], t["function"]["arguments"]
+                got = json.loads(m[i + 1]["content"])
+                for p in GUEST_REPLAY:
+                    if json.loads(json.dumps(account_backend(now, p).call(name, args), ensure_ascii=False)) != got:
+                        return None
+        return m
+    return run
 
 
 def cat_chat(split):
@@ -2404,8 +2426,9 @@ if __name__ == "__main__":
         #    и «войди в аккаунт» вместо «попроси того, кто выдавал аккаунт». Свой генератор; rand_profile подменяем
         rnd, real_profile = random.Random(7070 if split == "train" else 7071), rand_profile
         rand_profile = guest_profile
-        cats = ((cat_schedule, 30, 4), (cat_chat_guest, 8, 3), (cat_room, 8, 0), (cat_teacher, 8, 0), (cat_food, 5, 0),
-                (cat_travel, 5, 0), (cat_note_timed, 8, 2), (cat_note_clarify, 6, 0), (cat_hw_reminder, 6, 1), (cat_chat, 6, 0))
+        cats = ((cat_schedule, 30, 4), (cat_chat_guest, 8, 3), (cat_room, 8, 0), (cat_teacher, 8, 0),
+                (same_for_everyone(cat_food), 5, 0), (same_for_everyone(cat_travel), 5, 0), (cat_note_timed, 8, 2),
+                (cat_note_clarify, 6, 0), (same_for_everyone(cat_hw_reminder), 6, 1), (cat_chat, 6, 0))
         for cat, n_train, n_eval in cats:
             data[split] += build(n_train if split == "train" else n_eval, split, [(cat, 1)])
         rand_profile = real_profile

@@ -99,7 +99,7 @@ GUEST_NOTICE = ("⚠️ Ты не вошёл в аккаунт, поэтому �
 
 def guest():
     """Без входа: база в памяти с одним аккаунтом без профиля -> (store, аккаунт). Всё записанное — до конца разговора."""
-    st = Store(":memory:")
+    st = Store(":memory:", check_same_thread=False)  # сайт обрабатывает сообщения гостя в разных потоках
     acc = st.account(account_id=st.add_account("гость", None, "гость"))
     acc.pop("pw_hash")
     return st, acc | {"guest": True}  # profile() пометит его: в промпте «не вошёл в аккаунт»
@@ -110,12 +110,13 @@ def _now():
 
 
 class Store:
-    def __init__(self, path=None):
+    def __init__(self, path=None, check_same_thread=True):
+        """check_same_thread=False — соединением пользуются разные потоки (сайт), запросы тогда идут по очереди."""
         path = str(path or os.environ.get("ISHKA_DB") or DEFAULT_DB)
         if path != ":memory:":
             pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self.db = sqlite3.connect(path)
+        self.db = sqlite3.connect(path, check_same_thread=check_same_thread)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
