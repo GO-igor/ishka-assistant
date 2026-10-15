@@ -6,7 +6,7 @@ from campus import Campus, ENG_TEACHERS, GUARD, SUBJECTS, resolve_subject
 from conversation import Rec
 from dates import fmt, parse_at, parse_day
 
-POST_LIMIT = 10  # сколько действующих объявлений и сколько Д/З может быть у группы
+POST_LIMIT = 10  # сколько действующих объявлений и Д/З (вместе) может быть у группы
 ANNOUNCE_DAYS = 7  # сколько хранится объявление без даты
 
 
@@ -100,10 +100,11 @@ class Starosta:
             out.append(Rec(p["id"], o, " ".join(str(p.get(k) or "") for k in ("text", "subject", "task")), p.get("code")))
         return out
 
-    def _posts_full(self, kind):
-        recs, cap = self._group_recs(kind), self.limits["posts"]
+    def _posts_full(self):
+        """Лимит общий на объявления и Д/З: в списке для удаления — и то и другое."""
+        recs, cap = self._group_recs(), self.limits["posts"]
         if len(recs) >= cap:
-            return {"error": "limit", "limit": cap, "items": self.conv.numbered("posts", recs, ask=True, kind=kind)}
+            return {"error": "limit", "limit": cap, "items": self.conv.numbered("posts", recs, ask=True)}
         return None
 
     def group_announce(self, text, at=None, subgroup=None):
@@ -125,7 +126,7 @@ class Starosta:
             until = fmt(when)
         else:
             until = fmt(self.now + dt.timedelta(days=ANNOUNCE_DAYS))
-        full = self._posts_full("announcement")
+        full = self._posts_full()
         if full:
             return full
         return {"ok": True} | data | {"until": until} | self._post("announcement", data, until, subgroup)
@@ -157,7 +158,7 @@ class Starosta:
             r = min(outs, key=lambda x: x["due"])
         dues = {x["due"] for x in outs} | {r["due"]}
         until = max(d if " " in d else d + " 23:59" for d in dues | {x["due"] for _, x in alls})
-        full = self._posts_full("homework")
+        full = self._posts_full()
         if full:
             return full
         sent = self._post("homework", {"code": code, "subject": name, "task": task, "due": r["due"], "spec": due}, until, subgroup)

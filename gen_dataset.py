@@ -2217,7 +2217,7 @@ def cat_group_delete(split):
 
 
 def cat_group_limit(split):
-    """У группы уже максимум объявлений (или Д/З): староста удаляет старое — и новое уходит."""
+    """У группы уже максимум записей (объявления и Д/З — общий лимит): староста удаляет старое — и новое уходит."""
     kind = pick(["homework", "announcement"])
     for _ in range(40):  # длинный диалог собираем заново с тем же видом, чтобы фильтр длины не сдвинул доли
         m = group_limit_dialog(split, kind)
@@ -2233,10 +2233,10 @@ def group_limit_dialog(split, kind):
     # здесь лимит 2, модель учится тому же (показать список, удалить выбранное, отправить новое)
     b.limits["posts"] = 2
     for _ in range(40):
-        if len(b._group_recs(kind)) >= 2:
+        if len(b._group_recs()) >= 2:
             break
-        seed_posts(b, (kind,), 1)
-    if len(b._group_recs(kind)) < 2:
+        seed_posts(b, k=1)
+    if len(b._group_recs()) < 2:
         return None
     msgs = [system(now, b.profile)]
     if kind == "homework":
@@ -2252,10 +2252,10 @@ def group_limit_dialog(split, kind):
     res = call(b, msgs, name_, args)
     if res.get("error") != "limit":
         return None
-    noun = {"homework": ("действующее Д/З", "действующих Д/З", "действующих Д/З"), "announcement": POST_NOUN["announcement"]}[kind]
-    msgs.append({"role": "assistant", "content": f"У группы уже {res['limit']} {plural(res['limit'], *noun)} — больше нельзя 📢 "
-                                                 f"Удалить какое-нибудь из старых?\n{post_lines(now, res['items'], kind)}\n\n"
-                                                 "Напиши номер — удалю его и отправлю новое."})
+    msgs.append({"role": "assistant", "content": f"У группы уже {res['limit']} {plural(res['limit'], *POST_NOUN[None])} "
+                                                 "(объявления и Д/З вместе) — больше нельзя 📢 "
+                                                 f"Удалить что-нибудь из старого?\n{post_lines(now, res['items'])}\n\n"
+                                                 "Напиши номер — удалю и отправлю новое."})
     if rnd.random() < 0.15:
         msgs += [{"role": "user", "content": say(split, ["не надо"], ["тогда не отправляй", "ладно, не отправляй", "тогда не надо",
                                                                         "оставь как есть"])},

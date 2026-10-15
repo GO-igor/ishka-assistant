@@ -4,9 +4,10 @@
 chat.py сам собирает промпт ровно как при обучении (prompt_format.py, шаблон чата берёт из .gguf) и шлёт его
 в /completion, так что шаблон чата и разбор вызовов в llama.cpp не участвуют. Вызвать инструмент или ответить
 текстом, решает по P(<tool_call>) на первом токене ответа (порог CALL_THRESHOLD), а не жадным выбором токена.
-Запуск (без входа Ишка не работает; аккаунт заводится в accounts.py, профиль, заметки и напоминания хранятся
-в db/ishka.sqlite):
+Запуск (аккаунт заводится в accounts.py, профиль, заметки и напоминания хранятся в db/ishka.sqlite):
     pip install jinja2 && python chat.py --login ivanov
+Без входа (--guest или пустой логин) Ишка работает, но не знает группу и преподавателей, а заметки и напоминания
+живут до закрытия чата — об этом он предупреждает (store.GUEST_NOTICE).
 Сработавшие напоминания Ишка показывает при входе, перед каждым ответом и раз в минуту, пока чат открыт; утренний
 брифинг — сам, при первом входе за день с 7:30 до 12:00 или ровно в 7:30, если чат открыт (не ответил сервер — повторит).
 Запретные фразы (db/blocklist.json, guard.py): на такой вопрос Ишка отвечает отказом из списка, ответ модели или
@@ -23,7 +24,7 @@ from gen_dataset import system
 from guard import Guard
 from prompt_format import (TOOLS, tools_for, BROKEN, CALL_THRESHOLD, render, answer_prefix, parse_calls, answer_text,
                            call_msg, tool_msg, first_token_probs, tool_call_prob, pick_template)
-from store import DEFAULT_DB, Store
+from store import DEFAULT_DB, GUEST_NOTICE, Store, guest
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--url", default="http://localhost:8080", help="адрес сервера (для --api openai — с /v1)")
@@ -31,7 +32,8 @@ ap.add_argument("--api", choices=("completion", "openai"), default="completion",
                 help="completion — llama-server, промпт как при обучении; openai — Ollama, vLLM и т. п.")
 ap.add_argument("--name", default="ishka", help="имя модели (только для --api openai)")
 ap.add_argument("--now", help="подменить текущее время: '2026-10-06 12:10' (база тогда не меняется: прошедшее не удаляется)")
-ap.add_argument("--login", help="логин (пароль спросит); без него спросит и логин")
+ap.add_argument("--login", help="логин (пароль спросит); без него спросит и логин, пустой — без входа")
+ap.add_argument("--guest", action="store_true", help="без входа: Ишка не знает группу и преподавателей")
 ap.add_argument("--db", help="база аккаунтов (по умолчанию db/ishka.sqlite)")
 ap.add_argument("--debug", action="store_true", help="печатать сырой ответ модели")
 a = ap.parse_args()
@@ -41,23 +43,33 @@ guard = Guard()  # запретные фразы из db/blocklist.json: в во
 if guard.error:
     raise SystemExit(f"Не читается список запретных фраз {guard.error.split(';')[0]}. Исправь файл и запусти снова.")
 path = a.db or os.environ.get("ISHKA_DB") or str(DEFAULT_DB)
-if not os.path.exists(path):
-    raise SystemExit(f"Базы аккаунтов {path} нет: сначала заведи аккаунт, например\n"
-                     f"  python accounts.py{f' --db {a.db}' if a.db else ''} add {a.login or 'ivanov'} --group 8К51 --subgroup 2 --english Аксёнова")
-store = Store(path)
-login = a.login or input("логин: ")
-password = os.environ.get("ISHKA_PASSWORD")  # для проверок без ввода руками
-if password is None:
-    password = getpass.getpass("пароль: ")
-acc = store.check_login(unicodedata.normalize("NFC", login), password)
-if not acc:
-    raise SystemExit("Неверный логин или пароль")
+hint = (f"  python accounts.py{f' --db {a.db}' if a.db else ''} add {a.login or 'ivanov'} --group 8К51 --subgroup 2 --english Аксёнова")
+login = "" if a.guest else a.login
+if login is None:
+    try:
+        login = input("логин (Enter — без входа): ").strip() if os.path.exists(path) else ""
+    except EOFError:
+        login = ""
+if login:
+    if not os.path.exists(path):
+        raise SystemExit(f"Базы аккаунтов {path} нет: сначала заведи аккаунт, например\n{hint}")
+    store = Store(path)
+    password = os.environ.get("ISHKA_PASSWORD")  # для проверок без ввода руками
+    if password is None:
+        password = getpass.getpass("пароль: ")
+    acc = store.check_login(unicodedata.normalize("NFC", login), password)
+    if not acc:
+        raise SystemExit("Неверный логин или пароль")
+    if not a.now:  # прошедшее удаляем только по настоящим часам: с --now (проверка) база не трогается
+        store.purge_posts(now.strftime("%Y-%m-%d %H:%M"))
+    print(f"Привет, {acc['name'] or acc['login']}! Группа {acc['grp']}" + (
+        ", ты староста: можешь отправлять группе объявления и Д/З." if acc["role"] == "starosta" else "."))
+else:
+    store, acc = guest()  # всё записанное — в памяти, до закрытия чата
+    print(GUEST_NOTICE)
+    print("Войти: python chat.py --login <логин>" + ("" if os.path.exists(path) else f" (аккаунт заводится так:\n{hint})"))
 conv = Conversation()  # номера показанных списков и «удалить все?» — на весь разговор
 backend = Backend(now, store.profile(acc), store, acc["id"], conv)
-if not a.now:  # прошедшее удаляем только по настоящим часам: с --now (проверка) база не трогается
-    store.purge_posts(now.strftime("%Y-%m-%d %H:%M"))
-print(f"Привет, {acc['name'] or acc['login']}! Группа {acc['grp']}" + (
-    ", ты староста: можешь отправлять группе объявления и Д/З." if acc["role"] == "starosta" else "."))
 NAMES = {t["function"]["name"] for t in TOOLS}
 msgs = [system(now, backend.profile)]  # история в формате обучения (как в gen_dataset.py)
 MAX_ROUNDS = 4    # вызовов инструментов подряд на один вопрос; в датасете больше 4 не бывает
