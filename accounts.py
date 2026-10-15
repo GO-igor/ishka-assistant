@@ -158,7 +158,8 @@ elif a.cmd == "list":
         print("Аккаунтов нет")
     for r in rows:
         extra = ", ".join(x for x in (f"подгруппа {r['subgroup']}" if r["subgroup"] else "", r["english_teacher"] or "",
-                                      "курсы (А)" if r["adaptation"] else "", "" if r["can_login"] else "вход закрыт") if x)
+                                      "курсы (А)" if r["adaptation"] else "", "" if r["can_login"] else "вход закрыт",
+                                      "Telegram" if r["telegram"] else "") if x)
         print(f"{r['grp']:8} {'староста' if r['role'] == 'starosta' else 'студент ':8} {r['login']:20} {r['name'] or ''}"
               + (f"  ({extra})" if extra else ""))
 elif a.cmd == "edit":

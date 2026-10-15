@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     english_teacher TEXT,
     adaptation INTEGER NOT NULL DEFAULT 0,
     brief_date TEXT,                        -- в какой день уже показан утренний брифинг
+    tg_chat_id INTEGER,                     -- Telegram-чат, куда бот (notify.py) шлёт уведомления; NULL — не подключён
+    tg_since TEXT,                          -- когда подключён: объявления старосты шлём начиная с этого момента
     created TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS notes (          -- личные заметки и напоминания
@@ -46,6 +48,12 @@ CREATE TABLE IF NOT EXISTS group_posts (    -- объявления и Д/З о�
     created TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS group_posts_grp ON group_posts (grp, until);
+CREATE TABLE IF NOT EXISTS post_sent (      -- кому бот уже отправил объявление или Д/З старосты (не слать дважды)
+    post_id INTEGER NOT NULL REFERENCES group_posts(id) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    sent_at TEXT NOT NULL,
+    PRIMARY KEY (post_id, account_id)
+);
 """
 
 
@@ -121,6 +129,7 @@ class Store:
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.executescript(SCHEMA)
         self._migrate()
+        self._telegram_columns()
         self._normalize()
 
     def _migrate(self):
@@ -177,6 +186,19 @@ class Store:
         finally:
             self.db.execute("PRAGMA foreign_keys = ON")
 
+    def _telegram_columns(self):
+        """База до 15.10.2026: без Telegram (tg_chat_id, tg_since)."""
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(accounts)")}
+        try:
+            for c, t in (("tg_chat_id", "INTEGER"), ("tg_since", "TEXT")):
+                if c not in cols:
+                    self.db.execute(f"ALTER TABLE accounts ADD COLUMN {c} {t}")
+            self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS accounts_tg ON accounts (tg_chat_id)")
+            self.db.commit()
+        except sqlite3.OperationalError as e:
+            if "readonly" not in str(e) and "locked" not in str(e):
+                raise
+
     def _normalize(self):
         """База от первой версии: логины и группы хранились как введены (Петров, 8к51) — приводим к login_key/group_key."""
         for r in self.db.execute("SELECT id, login, grp FROM accounts").fetchall():
@@ -225,7 +247,8 @@ class Store:
 
     def accounts(self):
         return [dict(r) for r in self.db.execute(
-            "SELECT id, login, role, name, grp, subgroup, english_teacher, adaptation, pw_hash != '!' AS can_login "
+            "SELECT id, login, role, name, grp, subgroup, english_teacher, adaptation, pw_hash != '!' AS can_login, "
+            "tg_chat_id IS NOT NULL AS telegram "
             "FROM accounts ORDER BY grp, role = 'starosta' DESC, login")]
 
     def update_account(self, login, **fields):
@@ -251,7 +274,9 @@ class Store:
         return cur.rowcount > 0
 
     def set_password(self, login, password):
-        cur = self.db.execute("UPDATE accounts SET pw_hash = ? WHERE login = ?",
+        """Новый пароль (или '!' — вход закрыт). Telegram отключается: если старый пароль узнал кто-то чужой,
+        уведомления ему больше не придут; студент подключится заново через /login."""
+        cur = self.db.execute("UPDATE accounts SET pw_hash = ?, tg_chat_id = NULL, tg_since = NULL WHERE login = ?",
                               (hash_password(password) if password else "!", login_key(login)))
         self.db.commit()
         return cur.rowcount > 0
@@ -355,6 +380,31 @@ class Store:
         n = self.db.execute("DELETE FROM notes WHERE fire_at IS NOT NULL AND fire_at < ?", (now,)).rowcount
         self.db.commit()
         return n
+
+    # ---------- Telegram (notify.py) ----------
+    def link_telegram(self, account_id, chat_id, now):
+        """Чат подключён к аккаунту. Один чат — один аккаунт: у прежнего аккаунта этого чата он отключается."""
+        self.db.execute("UPDATE accounts SET tg_chat_id = NULL, tg_since = NULL WHERE tg_chat_id = ?", (chat_id,))
+        self.db.execute("UPDATE accounts SET tg_chat_id = ?, tg_since = ? WHERE id = ?", (chat_id, now, account_id))
+        self.db.commit()
+
+    def unlink_telegram(self, chat_id):
+        """Отключить чат. Возвращает логин аккаунта или None, если чат не был подключён."""
+        row = self.db.execute("SELECT login FROM accounts WHERE tg_chat_id = ?", (chat_id,)).fetchone()
+        self.db.execute("UPDATE accounts SET tg_chat_id = NULL, tg_since = NULL WHERE tg_chat_id = ?", (chat_id,))
+        self.db.commit()
+        return row["login"] if row else None
+
+    def telegram_accounts(self):
+        rows = self.db.execute("SELECT * FROM accounts WHERE tg_chat_id IS NOT NULL ORDER BY id").fetchall()
+        return [{k: r[k] for k in r.keys() if k != "pw_hash"} for r in rows]
+
+    def sent_posts(self, account_id):
+        return {r[0] for r in self.db.execute("SELECT post_id FROM post_sent WHERE account_id = ?", (account_id,))}
+
+    def mark_post_sent(self, post_id, account_id, now):
+        self.db.execute("INSERT OR IGNORE INTO post_sent (post_id, account_id, sent_at) VALUES (?, ?, ?)", (post_id, account_id, now))
+        self.db.commit()
 
     def set_brief_date(self, account_id, day):
         self.db.execute("UPDATE accounts SET brief_date = ? WHERE id = ?", (day, account_id))

@@ -22,6 +22,7 @@ from backend import Backend
 from conversation import Conversation
 from gen_dataset import system
 from guard import Guard
+from records import reminder_line
 from prompt_format import (TOOLS, tools_for, BROKEN, CALL_THRESHOLD, render, answer_prefix, parse_calls, answer_text,
                            call_msg, tool_msg, first_token_probs, tool_call_prob, pick_template)
 from store import DEFAULT_DB, GUEST_NOTICE, Store, guest
@@ -361,14 +362,6 @@ BRIEF_FROM, BRIEF_TO = dt.time(7, 30), dt.time(12, 0)  # утренний бри
 brief_day = [acc.get("brief_date")]
 brief_retry = [0, None]  # брифинг не получился (сервер не ответил): сколько раз и когда пробовать снова (через 5 минут, до 3 раз)
 told = set()  # с --now напоминания не удаляются: каждое показываем один раз
-
-
-def reminder_line(r):
-    if r.get("subject"):
-        c = dt.datetime.fromisoformat(r["class_at"])
-        what = f"Д/З к паре «{r['subject']}» ({c:%d.%m} в {c:%H:%M})"
-        return f"⏰ Напоминаю: {what}" + (f": {r['text']}" if r["text"] else "")
-    return f"⏰ Напоминаю: {r['text']}"
 
 
 def tick():

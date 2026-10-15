@@ -10,6 +10,15 @@ def subject_name(code):
     return SUBJECTS.get(code, {}).get("name", code)
 
 
+def reminder_line(r):
+    """Строка сработавшего напоминания (из due_reminders) — для чата и Telegram."""
+    if r.get("subject"):
+        c = dt.datetime.fromisoformat(r["class_at"])
+        what = f"Д/З к паре «{r['subject']}» ({c:%d.%m} в {c:%H:%M})"
+        return f"⏰ Напоминаю: {what}" + (f": {r['text']}" if r["text"] else "")
+    return f"⏰ Напоминаю: {r['text']}"
+
+
 LIMITS = {"note": 10, "homework": 10}  # заметки с напоминаниями вместе и отдельно напоминания о Д/З
 HOMEWORK_EVENING = dt.time(19, 0)  # накануне пары напоминаем в 19:00, а если уже поздно — за час до пары
 
@@ -111,7 +120,7 @@ class Records:
             self.store.delete_notes(self.account_id, [r["id"] for r in rows])
         out = []
         for r in sorted(rows, key=lambda r: r["fire_at"]):
-            o = {"text": r["text"], "fire_at": r["fire_at"]}
+            o = {"id": r["id"], "text": r["text"], "fire_at": r["fire_at"]}
             if r["subject"]:
                 o |= {"subject": subject_name(r["subject"]), "class_at": r["class_at"]}
             out.append(o)
