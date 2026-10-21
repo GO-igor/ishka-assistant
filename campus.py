@@ -77,6 +77,16 @@ def walk_minutes(a, b):
     return None
 
 
+def route_to(b, room):
+    """Маршрут до аудитории в корпусе b: {"route"} или, если его нет, {"route": None, "floor_guess"} по номеру."""
+    exact = [r for r in ROUTES if r["building"] == b and r["room"] == room]
+    rule = [r for r in ROUTES if r["building"] == b and r["room"] == "*"]
+    if exact or rule:
+        return {"route": (exact or rule)[0]["route"]}
+    digit = next((c for c in room if c.isdigit()), None)
+    return {"route": None, "floor_guess": int(digit) if digit else None}
+
+
 class Campus:
     """Инструменты, которым нужны только время (self.now) и профиль (self.profile: subgroup, english_teacher,
     adaptation). self.events и self.session можно подменить (генератор датасета, тесты)."""
@@ -157,7 +167,9 @@ class Campus:
             out["note_subgroup"] = "подгруппа не указана, лабы показаны для всех подгрупп"
         return out
 
-    def find_room(self, room=None, building=None, from_building=None):
+    def find_room(self, room=None, building=None, from_building=None, subject=None):
+        if subject and not room:
+            return self.subject_rooms(subject, building, from_building)
         b = resolve_building(building)
         if b is None and room:  # ищем аудиторию в расписании
             cands = {l["building"] for l in LESSONS if l["room"] == room}
@@ -170,19 +182,50 @@ class Campus:
         out = {"building": b, "building_name": BUILDINGS[b]["name"], "address": BUILDINGS[b]["address"]}
         if room:
             out["room"] = room
-            exact = [r for r in ROUTES if r["building"] == b and r["room"] == room]
-            rule = [r for r in ROUTES if r["building"] == b and r["room"] == "*"]
-            if exact:
-                out["route"] = exact[0]["route"]
-            elif rule:
-                out["route"] = rule[0]["route"]
-            else:
-                digit = next((c for c in room if c.isdigit()), None)
-                out["route"] = None
-                out["floor_guess"] = int(digit) if digit else None
+            out |= route_to(b, room)
         fb = resolve_building(from_building)
         if fb:
             out["walk_minutes"] = walk_minutes(fb, b)
+        return out
+
+    def subject_rooms(self, subject, building=None, from_building=None):
+        """find_room с предметом вместо аудитории: где проходят пары этого предмета у студента (его подгруппа и
+        преподаватель английского из профиля) и как туда дойти. building — только в этом корпусе."""
+        code = resolve_subject(subject)
+        if not code:
+            return {"error": "subject_not_found"}
+        p, name = self.profile, SUBJECTS[code]["name"]
+        mine = [l for l in LESSONS if l["subject"] == code and l["building"]
+                and not (l["subgroup"] and p.get("subgroup") and l["subgroup"] != p["subgroup"])
+                and not (code == "eng" and p.get("english_teacher") and l["teacher"] != p["english_teacher"])]
+        if not mine:
+            return {"subject": name, "error": "no_room"}  # физра: аудитории в расписании нет
+        out = {"subject": name}
+        b = resolve_building(building)
+        if b and not any(l["building"] == b for l in mine):
+            out["not_in_building"] = BUILDINGS[b]["name"]  # в этом корпусе пар нет — показываем, где есть
+        elif b:
+            mine = [l for l in mine if l["building"] == b]
+        by_room = {}
+        for l in sorted(mine, key=lambda l: (("ЛК", "ПР", "ЛБ").index(l["type"]), l["building"], l["room"])):
+            by_room.setdefault((l["building"], l["room"]), []).append(l)
+        fb, rooms = resolve_building(from_building), []
+        for (bc, room), ls in by_room.items():
+            r = {"building": bc, "building_name": BUILDINGS[bc]["name"], "address": BUILDINGS[bc]["address"], "room": room,
+                 "types": list(dict.fromkeys(l["type"] for l in ls))}
+            if code == "eng" and not p.get("english_teacher"):
+                r["teacher"] = ls[0]["teacher"]
+            if not p.get("subgroup") and any(l["subgroup"] for l in ls):  # подгруппа не указана: чьи это лабы
+                r["subgroups"] = sorted({l["subgroup"] for l in ls if l["subgroup"]})
+            r |= route_to(bc, room)
+            if fb:
+                r["walk_minutes"] = walk_minutes(fb, bc)
+            rooms.append(r)
+        out["rooms"] = rooms
+        if code == "eng" and not p.get("english_teacher"):
+            out["note"] = "преподаватель английского не указан в профиле: показаны аудитории всех групп"
+        if any("subgroups" in r for r in rooms):
+            out["note_subgroup"] = "подгруппа не указана, лабы показаны для всех подгрупп"
         return out
 
     def get_teacher(self, subject, lesson_type="любой"):

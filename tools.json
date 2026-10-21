@@ -22,7 +22,7 @@
   "type": "function",
   "function": {
    "name": "find_room",
-   "description": "Где аудитория или корпус, как дойти, сколько идти.",
+   "description": "Где аудитория, корпус или пары предмета, как дойти, сколько идти.",
    "parameters": {
     "type": "object",
     "properties": {
@@ -37,6 +37,10 @@
      "from_building": {
       "type": "string",
       "description": "откуда идёт студент"
+     },
+     "subject": {
+      "type": "string",
+      "description": "предмет, если аудитория не названа: напр. 'английский'"
      }
     }
    }

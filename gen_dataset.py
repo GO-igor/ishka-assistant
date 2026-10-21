@@ -6,7 +6,7 @@ import datetime as dt, json, random, pathlib, re
 import paraphrase, prompt_format
 from backend import Backend, SUBJECTS, WD_RU, WEEKDAYS, HOLIDAYS, EVENT_KINDS, resolve_subject
 from conversation import _matches, _stems
-from dates import remind_time
+from dates import date_words, remind_time, when_words
 from store import Store
 
 rnd = random.Random(42)
@@ -88,8 +88,7 @@ def lesson_line(i, l, with_teacher=True):
     return f"{i}. {l['time'][:5]} — {SHORT[l['subject']]}, {TYPE[l['type']]}{where(l)}{t}{ov}"
 
 
-def date_ru(d):
-    return f"{d.day} {MONTHS[d.month - 1]}"
+date_ru = date_words  # 2026-10-23 -> '23 октября', как в ответах инструментов (date_text)
 
 
 # ---------------- категории ----------------
@@ -389,13 +388,7 @@ def hm(t):
     return f"{int(t[:2])}:{t[3:5]}"
 
 
-def when_ru(now, s):
-    """'2026-10-08 10:25' или '2026-10-08' -> 'сегодня в 10:25' / 'завтра' / 'в чт 8 октября в 10:25'."""
-    has_t = " " in s
-    t = dt.datetime.fromisoformat(s) if has_t else dt.datetime.fromisoformat(s + " 00:00")
-    delta = (t.date() - now.date()).days
-    day = {0: "сегодня", 1: "завтра"}.get(delta, f"в {WD_SHORT[t.weekday()]} {date_ru(t.date())}")
-    return f"{day} в {t:%H:%M}" if has_t else day
+when_ru = when_words  # 'сегодня в 10:25' / 'завтра' / 'в чт 8 октября в 10:25' — то же, что fire_at_text и др.
 
 
 def student_subjects(b):
@@ -956,35 +949,36 @@ def cat_brief(split, posts=False):
 
 CHAT = [
     (["привет", "прив", "здарова", "привет, ты кто?", "хай"],
-     ["Привет! 👋 Я Ишка, помощник студентов ИШИТР. Подскажу пары, аудитории и как дойти, где перекусить, запишу заметки и напоминалки. Что нужно?",
-      "Привет-привет 🙂 Я Ишка. Могу показать расписание, найти аудиторию, напомнить о Д/З накануне пары. С чего начнём?"]),
+     ["Привет! 👋 Я Ишка, помощник студентов ИШИТР. Подскажу пары, аудитории и как дойти, где перекусить, запишу заметки и напоминалки, объясню тему или просто поболтаем. Что нужно?",
+      "Привет-привет 🙂 Я Ишка. Могу показать расписание, найти аудиторию, напомнить о Д/З накануне пары, объяснить непонятную тему — или просто поговорить. С чего начнём?"]),
     (["спасибо", "спс", "благодарю", "спасибо большое!", "пасиб"],
      ["Обращайся! 🙌", "Всегда рад помочь 😊", "Не за что, удачи с учёбой! 💪"]),
     (["что ты умеешь?", "что ты можешь", "чем можешь помочь", "какие у тебя функции", "а ты что вообще умеешь"],
-     ["Вот что я умею:\n• расписание на любой день и кто ведёт предмет\n• где аудитория, как дойти и успеешь ли до следующей пары\n• где перекусить рядом\n• сколько до сессии и когда экзамены\n• мероприятия и хакатоны для ИШИТР\n• заметки и напоминания, напоминание о Д/З накануне пары\n• утренний брифинг в 7:30: пары, объявления старосты и твои напоминания\n\nСпрашивай 🙂"]),
+     ["Вот что я умею:\n• расписание на любой день и кто ведёт предмет\n• где аудитория, как дойти и успеешь ли до следующей пары\n• где перекусить рядом\n• сколько до сессии и когда экзамены\n• мероприятия и хакатоны для ИШИТР\n• заметки и напоминания, напоминание о Д/З накануне пары\n• утренний брифинг в 7:30: пары, объявления старосты и твои напоминания\n• объяснить тему простыми словами: матан, матлогика, питон, информатика\n• просто поболтать: кино, игры, музыка, машины, советы — о чём угодно\n\nСпрашивай 🙂"]),
     (["какой проходной балл был на 09.03.04?", "сколько баллов надо чтобы поступить в ИШИТР", "проходные баллы в тпу какие"],
-     ["Проходных баллов у меня нет, а гадать не буду 🙃 Точные цифры — на сайте приёмной комиссии ТПУ. С расписанием, аудиториями и напоминаниями помогу сразу."]),
+     ["Проходных баллов у меня нет, а гадать не буду 🙃 Точные цифры — на сайте приёмной комиссии ТПУ."]),
     (["какая погода завтра", "будет дождь?", "сколько градусов на улице"],
-     ["Погоду я не знаю 🌦️ Глянь прогноз в приложении. А вот во сколько завтра пары и в каких корпусах — подскажу!"]),
+     ["Погоду в реальном времени я не вижу 🌦️ Глянь прогноз в приложении. Но в Томске погода любит удивлять, так что тёплая кофта и зонт лишними не будут 😄"]),
     (["сделай за меня лабу по питону", "напиши за меня курсовую", "реши мне контрольную"],
-     ["Сделать за тебя не могу 🙂 Но могу напомнить про Д/З накануне пары, чтобы ты точно успел. Поставить напоминание?",
-      "Тут без читов 😅 Если что-то непонятно, лучше спроси преподавателя — подсказать, когда у вас ближайшая пара?"]),
+     ["Сделать за тебя не могу 🙂 Но могу объяснить тему, разобрать похожий пример или помочь найти ошибку в твоём решении. С чего начнём?",
+      "Тут без читов 😅 Давай лучше разберём, что непонятно, — объясню по шагам, а решишь уже сам."]),
     (["дай номер телефона Ворониной", "какой телефон у преподавателя по матану", "почта Шефера какая"],
      ["Контактов преподавателей у меня нет 🙃 Обычно их пишут на сайте ТПУ или знает староста. Могу подсказать, когда у вас с ним ближайшая пара."]),
     (["когда стипендия", "когда придёт стипуха?", "какая стипендия в тпу"],
-     ["Про стипендию у меня данных нет 🤷 Точно ответят в деканате или студенческом офисе. А с расписанием и напоминаниями помогу!"]),
+     ["Про стипендию у меня данных нет 🤷 Точно ответят в деканате или студенческом офисе."]),
     (["ты бот?", "ты нейросеть?", "ты человек?"],
      ["Я Ишка — ИИ-помощник студентов ИШИТР 🤖 Не человек, но расписание знаю лучше многих 😉"]),
     (["мне лень учиться", "я устал", "всё бесит, сессия скоро"],
      ["Понимаю, бывает 😮‍💨 Давай маленькими шагами: скажи, что горит сильнее всего, — поставлю напоминания. А ещё не забывай спать и есть 🍔",
       "Держись 💪 Хочешь, проведу брифинг: что сегодня по парам и о чём я должен напомнить?"]),
-    # функции, которых больше нет: вежливо отказываем и говорим, что можно вместо них
-    (["объясни, что такое рекурсия", "расскажи про производную простыми словами", "что такое ДНФ? объясни",
-      "объясни тему по матлогике", "можешь объяснить циклы в питоне?"],
-     ["Объяснять темы я не умею 🙂 Лучше спроси преподавателя на паре или на консультации — могу подсказать, когда у тебя ближайшая пара.",
-      "Темы я не объясняю — я про расписание, аудитории и напоминания 🙂 Спроси преподавателя или одногруппников, а я подскажу, когда ближайшая пара."]),
+    # раньше здесь был отказ «объяснять темы не умею»; объяснения тем — в разделе 9 (data/explain_bank.json).
+    # Число вопросов и ответов в записях не меняем: иначе сдвинутся случайные числа и ключи перефразов раздела 2
+    (["давай просто поболтаем", "мне скучно, поговори со мной", "о чём с тобой можно поговорить?",
+      "можно с тобой просто пообщаться?", "о чём мы можем поговорить кроме учёбы?"],
+     ["Конечно, давай! 🙂 Говорить можно о чём угодно: кино и сериалы, игры, музыка, машины, спорт, наука, жизнь в общаге — или просто как прошёл день. С чего начнём?",
+      "Давай! Я за любую тему: посоветую фильм или игру, расскажу интересный факт, сыграем в города или загадаю загадку. А можно и про учёбу 😉 Что выберешь?"]),
     (["составь план подготовки к экзамену", "распиши билеты по дням", "сделай план повторения по матану"],
-     ["План подготовки я не составляю 🙂 Но могу сказать, сколько дней до сессии и когда экзамены, и поставить напоминания на дни, когда будешь заниматься."]),
+     ["Давай по шагам 🙂 Раздели билеты поровну на дни, последний день оставь на повторение, а каждый билет закрепляй задачей, а не только чтением. Скажи, сколько билетов и сколько дней, — прикину, по сколько в день. А сколько осталось до сессии, могу посмотреть."]),
     (["запиши экзамен по питону на 15 января", "добавь экзамен по матану", "внеси дату экзамена по инфе"],
      ["Даты экзаменов я беру из расписания сессии — сам их не вношу 🙂 Могу поставить тебе напоминание: скажи, о чём и когда напомнить."]),
     (["присылай брифинг в 8", "отключи утренний брифинг", "поменяй время брифинга"],
@@ -1101,6 +1095,201 @@ def cat_chat_extra(split):
     return [system(now, p), {"role": "user", "content": pick(qs)}, {"role": "assistant", "content": pick(answers)}]
 
 
+# ---------------- раздел 9: свободный разговор и «объясни тему» (с 20.10.2026) ----------------
+# Раньше на всё не про учёбу Ишка отвечал «я больше по учёбе», а «объясни тему» с 14.10 была вырезана. Теперь:
+# data/chat_bank.json — болтовня на любые темы (chat: вопросы и ответы; dialogs: разговоры в несколько реплик; prefix:
+# короткий разговор перед просьбой к инструменту; after: реплика после ответа инструмента), data/explain_bank.json —
+# объяснения тем (extra — формулировки только для train, followups — продолжение: «не понял, проще», «дай задачку»).
+# Последний вопрос записи — только для eval, а каждая HOLDOUT-я запись целиком только в eval (data/eval_chat.jsonl):
+# так видно, болтает ли Ишка и на темы, которых в обучении не было.
+BANKS = {}
+HOLDOUT = 7
+
+
+def bank(name):
+    if name not in BANKS:
+        BANKS[name] = json.loads((pathlib.Path(__file__).parent / "data" / f"{name}.json").read_text(encoding="utf-8"))
+    return BANKS[name]
+
+
+def held_out(i):
+    return i % HOLDOUT == HOLDOUT - 1
+
+
+def held(items, split):
+    """train — все записи, кроме каждой HOLDOUT-й; eval — только они."""
+    return [x for i, x in enumerate(items) if held_out(i) == (split == "eval")]
+
+
+def chat_profile():
+    """Болтают все: с профилем, без входа (15%), иногда староста (у него в промпте больше инструментов)."""
+    r = rnd.random()
+    if r < 0.15:
+        return {"guest": True}
+    p = rand_profile()
+    return p | {"role": "starosta"} if r > 0.92 else p
+
+
+def turns(ts):
+    out = []
+    for t in ts:
+        out += [{"role": "user", "content": t["user"]}, {"role": "assistant", "content": t["assistant"]}]
+    return out
+
+
+def chat_example(q, answer):
+    return [system(rand_now(), chat_profile()), {"role": "user", "content": q}, {"role": "assistant", "content": answer}]
+
+
+def cat_free_chat(split):
+    it = pick(held(bank("chat_bank")["chat"], "train"))
+    return chat_example(pick(it["questions"][:-1]), pick(it["answers"]))
+
+
+def cat_dialog(split):
+    d = pick(held(bank("chat_bank")["dialogs"], split))
+    return [system(rand_now(), chat_profile())] + turns(d["turns"])
+
+
+def explain_example(it, q, follow=False):
+    m = chat_example(q, it["answer"])
+    if follow:
+        m += turns(it["followups"][:rnd.randint(1, len(it["followups"]))])
+    return m
+
+
+def cat_explain(split, follow=False):
+    it = pick([x for x in held(bank("explain_bank"), "train") if x.get("followups") or not follow])
+    return explain_example(it, pick(it["questions"][:-1] + it.get("extra", [])), follow)
+
+
+def cat_explain_follow(split):
+    return cat_explain(split, follow=True)
+
+
+
+
+# ---------------- раздел 10: аудитория по названию предмета (с 21.10.2026) ----------------
+# «Как добраться до кабинета английского в 10 корпусе?» — find_room(subject=...): где пары этого предмета у студента и как
+# дойти. Раньше Ишка звал find_room только с корпусом и выдумывал этаж. Формы: (как сказал — им. п., род. п., дат. п.)
+SUBJ_SAY = {
+    "eng": [("английский", "английского", "английскому"), ("англ", "англа", "англу"), ("инглиш", "инглиша", "инглишу"),
+            ("английский язык", "английского языка", "английскому языку"),
+            ("иностранный язык", "иностранного языка", "иностранному языку")],
+    "matlog": [("матлогика", "матлогики", "матлогике"), ("матлог", "матлога", "матлогу"), ("мат.логика", "мат.логики", "мат.логике")],
+    "math": [("математика", "математики", "математике"), ("матан", "матана", "матану"), ("матеша", "матеши", "матеше"),
+             ("вышмат", "вышмата", "вышмату")],
+    "inf": [("информатика", "информатики", "информатике"), ("инфа", "инфы", "инфе")],
+    "python": [("питон", "питона", "питону"), ("python", "python", "python"), ("прога", "проги", "проге"),
+               ("программирование", "программирования", "программированию")],
+    "hist": [("история", "истории", "истории"), ("история России", "истории России", "истории России")],
+    "intro": [("введение в ИТ", "введения в ИТ", "введению в ИТ"), ("вит", "вита", "виту")],
+    "proj": [("проектная деятельность", "проектной деятельности", "проектной деятельности"), ("проектка", "проектки", "проектке")],
+    "kod": [("код ТПУ", "кода ТПУ", "коду ТПУ")],
+    "rus_a": [("русский", "русского", "русскому"), ("русский язык", "русского языка", "русскому языку")],
+    "eng_a": [("адаптационный английский", "адаптационного английского", "адаптационному английскому")],
+    "math_a": [("математика (А)", "математики (А)", "математике (А)"),
+               ("адаптационная математика", "адаптационной математики", "адаптационной математике")],
+    "pe": [("физра", "физры", "физре"), ("физкультура", "физкультуры", "физкультуре")],
+    None: [("химия", "химии", "химии"), ("физика", "физики", "физике"), ("черчение", "черчения", "черчению")],
+}
+SUBJ_W = {"eng": 22, "matlog": 10, "math": 10, "inf": 10, "python": 10, "hist": 6, "intro": 8, "proj": 5, "kod": 4, "rus_a": 3,
+          "eng_a": 3, "math_a": 3, "pe": 4, None: 2}
+SUBJ_ROOM_PHR = ["как дойти до кабинета {g}{b}", "как добраться до кабинета {g}{b}?", "где проходит {s}{b}?",
+                 "в какой аудитории {s}{b}", "как добраться до аудитории по {d}{b}", "где у нас {s}{b}, как туда дойти",
+                 "куда идти на пару по {d}{b}", "подскажи дорогу до кабинета {g}{b}", "{s}{b} это где вообще",
+                 "в каком кабинете {s}{b}?", "где пары по {d}{b}? и как дойти",
+                 "как найти кабинет {g}{b}", "не могу найти, где {s}{b}, помоги"]
+TYPE_PL = {"ЛК": "лекции", "ПР": "практики", "ЛБ": "лабы"}
+B_LOC = {"ГК": "главном корпусе", "КЦ": "КЦ", "МКЦ": "МКЦ"}
+
+
+def route_text(r):
+    if r.get("route"):
+        return r["route"]
+    if r.get("floor_guess"):
+        return f"Точного маршрута у меня пока нет, но судя по номеру — {r['floor_guess']} этаж."
+    return "Точного маршрута внутри корпуса у меня пока нет 🙃"
+
+
+def subject_rooms_answer(res, p, said, bld, from_b):
+    """Ответ на find_room(subject=...): одна аудитория — где и маршрут; несколько — по строке на каждую."""
+    s, g, d = said
+    if res.get("error") == "subject_not_found":
+        return f"Предмет «{s}» в расписании не нашёл 🤔 Как он называется полностью?"
+    if res.get("error") == "no_room":
+        return f"У {g} аудитории в расписании нет 🙂 Где проходят занятия, лучше уточни у преподавателя или старосты."
+    rooms, seen = res["rooms"], set()
+    fname = None if not from_b else from_b if from_b in ("ГК", "КЦ", "МКЦ") else f"{from_b} корпуса"
+
+    def place(r):
+        out = f"{r['building'] + ' корпус' if r['building'].isdigit() else r['building']}, " + \
+              (f"ауд. {r['room']}" if r["room"][:1].isdigit() else r["room"])
+        if r["building"] not in seen:
+            seen.add(r["building"])
+            out += f" ({r['address']})"
+        return out
+
+    def walk(r, bullet=False):
+        w = r.get("walk_minutes")
+        if fname is None or w is None:
+            return ""
+        if bullet:
+            return ", это корпус, где ты сейчас" if w == 0 else f", от {fname} идти примерно {w} мин"
+        return " Ты как раз в этом корпусе 🙂" if w == 0 else f" От {fname} идти примерно {w} мин 🚶"
+
+    head = f"В {B_LOC.get(bld, f'{bld} корпусе')} пар по {d} нет 🤔 " if res.get("not_in_building") else ""
+    if len(rooms) == 1:
+        r = rooms[0]
+        tag = f" (подгруппа {', '.join(map(str, r['subgroups']))})" if r.get("subgroups") else ""
+        ans = head + f"{cap(short(res['subject']))} — {place(r)}{tag}.{walk(r)}\n{route_text(r)}"
+    else:
+        lines = []
+        for r in rooms:
+            label = r["teacher"] if r.get("teacher") else " и ".join(TYPE_PL[t] for t in r["types"])
+            if r.get("subgroups"):
+                sg = r["subgroups"]
+                label += f" ({'подгруппа' if len(sg) == 1 else 'подгруппы'} {', '.join(map(str, sg))})"
+            lines.append(f"• {label} — {place(r)}{walk(r, bullet=True)}. {route_text(r)}")
+        ans = (head + "Вот где они:" if head else f"{cap(short(res['subject']))}:") + "\n" + "\n".join(lines)
+    if "note" in res or "note_subgroup" in res:
+        sub, eng = "note_subgroup" in res, "note" in res
+        if p.get("guest"):
+            what = ("твою подгруппу и преподавателя английского" if sub and eng else
+                    "твою подгруппу" if sub else "твоего преподавателя английского")
+            ans += f"\n\nЯ показал аудитории для всех групп: ты не вошёл в аккаунт, поэтому я не знаю {what}. " \
+                   "Войди — и буду показывать только твои."
+        else:
+            what = ("не указаны подгруппа и преподаватель английского" if sub and eng else
+                    "не указана подгруппа" if sub else "не указан преподаватель английского")
+            ans += f"\n\nЯ показал аудитории для всех групп: в твоём аккаунте {what}. Попроси того, кто выдавал " \
+                   "аккаунт, дописать — тогда буду показывать только твои."
+    return ans
+
+
+def cat_subject_room(split):
+    now = rand_now()
+    p = guest_profile() if rnd.random() < 0.15 else rand_profile()
+    b = Backend(now, p)
+    code = rnd.choices(list(SUBJ_W), list(SUBJ_W.values()))[0]
+    said = pick(SUBJ_SAY[code])
+    args = {"subject": said[0]}
+    bsay = ""
+    if code and code != "pe" and rnd.random() < 0.3:
+        mine = sorted({r["building"] for r in b.find_room(subject=said[0]).get("rooms", [])})
+        bld = pick(mine) if rnd.random() < 0.7 else pick([x for x in ("ГК", "КЦ", "10", "19", "8") if x not in mine])
+        bsay, args["building"] = " в " + B_LOC.get(bld, f"{bld} корпусе"), bld
+    q = pick(split_phr(SUBJ_ROOM_PHR, split)).format(s=said[0], g=said[1], d=said[2], b=bsay)
+    from_b = pick(["ГК", "КЦ", "19", "10"]) if code and code != "pe" and rnd.random() < 0.15 else None
+    if from_b:
+        qm = "?" if q.endswith("?") else ""
+        q = q.rstrip("?") + pick([f", я сейчас в {from_b if from_b in ('ГК', 'КЦ') else from_b + ' корпусе'}", f" (я в {from_b})"]) + qm
+        args["from_building"] = from_b
+    if rnd.random() < 0.3:
+        q = cap(q)
+    res = b.find_room(**args)
+    return [system(now, p), {"role": "user", "content": q}, tc("find_room", args), tr("find_room", res),
+            {"role": "assistant", "content": subject_rooms_answer(res, p, said, args.get("building"), from_b)}]
 
 
 # ---------------- староста: объявления и Д/З группе; мероприятия и хакатоны ----------------
@@ -2411,6 +2600,49 @@ NEW_CATS = [(cat_note_timed, 9), (cat_note_clarify, 8), (cat_hw_reminder, 7), (c
 CATS = [(cat_schedule, 30), (cat_room, 18), (cat_teacher, 14), (cat_travel, 12), (cat_food, 12), (skip_add_exam, 7), (skip_profile, 7)]
 
 
+# Раздел 9: болтовня рядом с просьбами к инструментам — чтобы после разговора о фильмах Ишка по-прежнему звал get_schedule
+TOOL_MIX = [(cat_schedule, 6), (cat_room, 3), (cat_teacher, 2), (cat_food, 2), (cat_note_timed, 3), (cat_brief, 2),
+            (cat_session, 2), (cat_hw_reminder, 2), (cat_note_list, 1), (cat_events, 1)]
+
+
+def tool_example(split):
+    while True:
+        m = rnd.choices([c for c, _ in TOOL_MIX], [w for _, w in TOOL_MIX])[0](split)
+        if m and m[2].get("tool_calls"):  # сразу вызов: примеры, где Ишка сначала переспрашивает, сюда не берём
+            return m
+
+
+def cat_prefix_tool(split):
+    """Сначала поболтали, потом просьба к инструменту."""
+    m = tool_example(split)
+    return m[:1] + turns(pick(held(bank("chat_bank")["prefix"], split))["turns"]) + m[1:]
+
+
+def cat_tool_after(split):
+    """Ишка ответил по расписанию (или поставил напоминание), а студент продолжает болтать."""
+    a = pick(held(bank("chat_bank")["after"], split))
+    return tool_example(split) + [{"role": "user", "content": a["user"]}, {"role": "assistant", "content": a["assistant"]}]
+
+
+CHAT_CATS_9 = [(cat_free_chat, 190), (cat_explain, 100), (cat_explain_follow, 35), (cat_dialog, 55), (cat_prefix_tool, 40),
+               (cat_tool_after, 25)]
+
+
+def eval_chat():
+    """data/eval_chat.jsonl: отложенные записи целиком и последний вопрос у половины остальных."""
+    rows = []
+    for i, it in enumerate(bank("chat_bank")["chat"]):
+        if held_out(i) or i % 2 == 0:
+            rows.append(chat_example(pick(it["questions"]) if held_out(i) else it["questions"][-1], pick(it["answers"])))
+    for i, it in enumerate(bank("explain_bank")):
+        if held_out(i) or i % 2 == 0:
+            rows.append(explain_example(it, pick(it["questions"]) if held_out(i) else it["questions"][-1],
+                                        follow=held_out(i) and bool(it.get("followups"))))
+    rows += [cat_dialog("eval") for _ in held(bank("chat_bank")["dialogs"], "eval")]
+    rows += [cat_prefix_tool("eval") for _ in range(12)] + [cat_tool_after("eval") for _ in range(8)]
+    return rows
+
+
 def build(n, split, cats=CATS):
     out, fns, w = [], [c for c, _ in cats], [w for _, w in cats]
     while len(out) < n:
@@ -2494,8 +2726,27 @@ if __name__ == "__main__":
             data[split] += build(12, split, [(cat_schedule, 1)])
             rand_profile, EXTRA_PHR = real_profile, {}
             rnd.shuffle(data[split])
+        # 9) Свободный разговор и «объясни тему» — свой генератор. Eval — отдельный файл data/eval_chat.jsonl, чтобы
+        #    оценка по data/eval.jsonl осталась сравнимой с прошлыми
+        rnd = random.Random(9090 if split == "train" else 9091)
+        if split == "train":
+            for cat, n in CHAT_CATS_9:
+                data[split] += build(n, split, [(fits(cat), 1)])
+            rnd.shuffle(data[split])
+        else:
+            chat_eval = [m for m in eval_chat() if est_tokens(m) <= MAX_TOKENS]
+        # 10) Аудитория по названию предмета (find_room с subject) — свой генератор. В eval — в конец файла, чтобы
+        #     первые 240 примеров остались теми же, что в прошлых оценках
+        rnd = random.Random(10100 if split == "train" else 10101)
+        data[split] += build(110 if split == "train" else 20, split, [(cat_subject_room, 1)])
+        if split == "train":
+            rnd.shuffle(data[split])
         rnd = main_rnd
         with open(root / f"{split}.jsonl", "w", encoding="utf-8") as f:
             for m in data[split]:
                 f.write(json.dumps({"messages": m}, ensure_ascii=False) + "\n")
         print(split, len(data[split]))
+    with open(root / "eval_chat.jsonl", "w", encoding="utf-8") as f:
+        for m in chat_eval:
+            f.write(json.dumps({"messages": m}, ensure_ascii=False) + "\n")
+    print("eval_chat", len(chat_eval))

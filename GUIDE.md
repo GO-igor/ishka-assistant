@@ -31,7 +31,7 @@
 
 ```bash
 python db/build_db.py                   # база из расписания -> db/*.json
-python gen_dataset.py                   # data/train.jsonl, data/eval.jsonl
+python gen_dataset.py                   # data/train.jsonl, data/eval.jsonl, data/eval_chat.jsonl
 python validate_dataset.py data/train.jsonl   # должно быть «Ошибок: 0»
 ```
 

@@ -5,11 +5,14 @@
     python evaluate.py --model unsloth/Qwen3-4B-Instruct-2507   # база, для сравнения
     python evaluate.py --model out/lora --step 2   # шаг после результата инструмента: ответ текстом, а не новый вызов
     python evaluate.py --model out/lora --step 3   # следующие сообщения в диалоге: номер из списка, «да», уточнение
+    python evaluate.py --model out/lora --data data/eval_chat.jsonl --show-text 30   # болтовня и «объясни тему»
+                                                                                     # (шаг 3 — диалоги в несколько реплик)
 """
 import argparse, collections, json, re, sys
 from unsloth import FastLanguageModel
 from prompt_format import CALL_THRESHOLD, answer_prefix, answer_text, parse_call, prompt_diff, tools_for  # как в chat.py
 from conversation import _nums, _stems  # номера и слова для delete_items — как их понимает бэкенд
+from campus import resolve_subject  # предмет — как его понимает бэкенд
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--model", default="out/lora")
@@ -19,6 +22,7 @@ ap.add_argument("--max-errors", type=int, default=20, help="сколько ош�
 ap.add_argument("--step", type=int, choices=(1, 2, 3), default=1,
                 help="1 — первый ответ на вопрос; 2 — ответ после результата инструмента; "
                      "3 — ответ на следующие сообщения студента (выбрал номер, сказал «да», уточнил время)")
+ap.add_argument("--show-text", type=int, default=0, help="сколько ответов текстом напечатать (посмотреть, как Ишка болтает)")
 a = ap.parse_args()
 
 model, tok = FastLanguageModel.from_pretrained(a.model, max_seq_length=4096, load_in_4bit=True)
@@ -89,6 +93,9 @@ def same_args(ga, pa):
             g, p = set(_stems(str(v))), set(_stems(str(pa[k])))
             if not (g == p or (g and p and (g <= p or p <= g))):
                 return False
+        elif k == "subject":  # «английский язык» и «английский», «матан» и «математика»: бэкенд поймёт одинаково
+            if norm(v) != norm(pa[k]) and (resolve_subject(v) is None or resolve_subject(v) != resolve_subject(pa[k])):
+                return False
         elif k == "numbers":  # [4, 2] и [2, 4], "2" и [2] — одно и то же
             if _nums(pa[k]) is None or sorted(_nums(v) or []) != sorted(_nums(pa[k])):
                 return False
@@ -109,6 +116,32 @@ def error(text):  # первые --max-errors печатаем сразу, ос�
 
 lines = list(open(a.data, encoding="utf-8"))
 lines = lines[: a.limit or len(lines)]
+
+# «Я больше по учёбе», «тут я не помощник» — так Ишка отвечал до раздела 9 датасета на всё не про учёбу
+REFUSAL = re.compile(r"не умею|не помощник|больше по уч[её]б|не объясняю|не могу помочь|не подскажу|не по адресу|"
+                     r"лучше спроси|это не ко мне|не моя тема", re.I)
+refusals = [0, 0]  # отказов, ответов текстом там, где в датасете ответ по существу
+shown = 0
+
+
+def check_text(q, gold, text):
+    """Ответ текстом: не отказ ли там, где в датасете ответ по существу. Первые --show-text ответов печатает."""
+    global shown
+    t = answer_text(text)
+    if shown < a.show_text:
+        shown += 1
+        print(f"[ответ] {q!r}\n  {t[:700]}\n", flush=True)
+    if REFUSAL.search(gold.get("content") or ""):
+        return
+    refusals[1] += 1
+    if REFUSAL.search(t):
+        refusals[0] += 1
+        error(f"[отказ] {q!r}: в датасете ответ по существу, а Ишка отказал\n  ответ: {raw(text, 300)}")
+
+
+def print_refusals():
+    if refusals[1]:
+        print(f"Отказал там, где ждали ответ по существу: {refusals[0]}/{refusals[1]}")
 
 
 def step2():
@@ -198,6 +231,8 @@ def step3():
                 key = "ответ текстом"
                 good = call is None and bool(answer_text(text))
                 g_ok += gcall is None
+                if call is None:
+                    check_text(msgs[j]["content"], gold, text)
                 if not good:
                     error(f"[шаг 3, ждали текст] {msgs[j]['content']!r}: получили {call and call.get('name')} "
                           f"(P(<tool_call>) = {pct(p)})\n  сырой ответ: {raw(text)}")
@@ -213,6 +248,7 @@ def step3():
         raise SystemExit("В данных нет диалогов с несколькими сообщениями студента")
     print(f"\nСледующих сообщений студента: {n}\nВерно (инструмент и аргументы или ответ текстом): {ok / n:.0%}"
           f" (жадным выбором токена, только инструмент: {g_ok / n:.0%})")
+    print_refusals()
     print("\nПо инструментам (верно/всего):")
     for k, v in per.most_common():
         print(f"  {k}: {hit[k]}/{v}")
@@ -262,6 +298,8 @@ for line in lines:
         if call:
             error(f"[лишний вызов] {msgs[1]['content']!r}: ждали ответ текстом, получили {call.get('name')}"
                   f" (P(<tool_call>) = {pct(p)})\n  сырой ответ: {raw(text)}")
+        else:
+            check_text(msgs[1]["content"], gold, text)
     hit[key] += args_ok - before
     if n % 10 == 0 or n == len(lines):
         print(f"  проверено {n}/{len(lines)}", file=sys.stderr, flush=True)
@@ -271,6 +309,7 @@ if 0 <= a.max_errors < len(errors):
 
 print(f"\nПримеров: {n}\nИнструмент выбран верно: {name_ok / n:.0%} (жадным выбором токена, как раньше: {g_name_ok / n:.0%})"
       f"\nИнструмент и аргументы верно: {args_ok / n:.0%}")
+print_refusals()
 print("\nПо инструментам (инструмент и аргументы верно):")
 for k, v in per.most_common():
     print(f"  {k}: {hit[k]}/{v}")

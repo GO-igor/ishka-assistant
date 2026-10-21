@@ -3,13 +3,13 @@
     records.py      — личные заметки и напоминания (SQLite, store.py)
     starosta.py     — объявления и Д/З от старосты
     conversation.py — списки с номерами и удаление по ним; состояние разговора
-    dates.py        — разбор дат и времени
+    dates.py        — разбор дат и времени; даты в ответах инструментов ещё и словами (with_words)
 Генератор датасета вызывает те же инструменты, поэтому ответы инструментов в обучении настоящие."""
 import json, pathlib, re
 from campus import (Campus, BUILDINGS, ENG_TEACHERS, EVENTS, EVENT_KINDS, HOLIDAYS, LESSONS, SESSION, SUBJECTS, WD_RU,
                     resolve_building, resolve_subject, walk_minutes, week_parity)
 from conversation import Conversation
-from dates import WEEKDAYS, parse_day
+from dates import WEEKDAYS, parse_day, with_words
 from records import LIMITS, Records
 from starosta import POST_LIMIT, Starosta
 
@@ -58,6 +58,19 @@ class Backend(Campus, Records, Starosta):
             self.conv.pending = {}  # «удалить все» подтверждается только следующим же вызовом удаления
         kw, err = check_args(SPEC[name], _clean(args))
         return err or getattr(self, name)(**kw)
+
+
+def _with_words(tool):
+    """Инструмент, в ответе которого даты ещё и словами («в пт 23 октября в 09:00»): и при call, и при прямом вызове
+    (генератор датасета)."""
+    def run(self, *a, **kw):
+        return with_words(tool(self, *a, **kw), self.now)
+    run.__name__, run.__doc__ = tool.__name__, tool.__doc__
+    return run
+
+
+for _name in SPEC:
+    setattr(Backend, _name, _with_words(getattr(Backend, _name)))
 
 
 def check_args(spec, args):
