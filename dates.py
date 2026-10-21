@@ -6,7 +6,7 @@ import datetime as dt, re
 WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
 WD_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
-ISO = re.compile(r"\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?")
+ISO = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}( [0-9]{2}:[0-9]{2})?")
 MOMENT_KEYS = ("fire_at", "class_at", "due", "at")  # момент: «в пт 23 октября в 09:00», «завтра», «сегодня в 10:25»
 
 
@@ -100,21 +100,48 @@ def when_words(now: dt.datetime, s) -> str:
 
 def with_words(obj, now):
     """Копия ответа инструмента, где рядом с каждой датой — она же словами: fire_at, class_at, due, at ->
-    <ключ>_text ('в пт 23 октября в 09:00'), date -> date_text ('пт 23 октября'), start, end -> '11 января'."""
+    <ключ>_text ('в пт 23 октября в 09:00'), date -> date_text ('пт 23 октября'), date с time -> ещё when_text
+    ('в пт 23 октября в 18:00', 'завтра в 18:00'), start, end -> '11 января'. Старые *_text пересчитываются от now:
+    так после полуночи «завтра» в истории разговора становится «сегодня»."""
     if isinstance(obj, list):
         return [with_words(x, now) for x in obj]
     if not isinstance(obj, dict):
         return obj
     out = {}
     for k, v in obj.items():
+        if isinstance(k, str) and k.endswith("_text") and (k[:-5] in obj or k == "when_text" and "date" in obj):
+            continue  # пересчитаем ниже, рядом с исходным ключом
         out[k] = with_words(v, now)
-        if not (isinstance(v, str) and ISO.fullmatch(v)):
+        try:
+            words = _words(k, v, now)
+            t = obj.get("time") if k == "date" and words else None
+            when = when_words(now, f"{v} {t}") if isinstance(t, str) and re.fullmatch(r"[0-9]{2}:[0-9]{2}", t) else None
+        except ValueError:  # «2026-11-31», «25:00»: такого нет — оставляем как есть
             continue
-        if k in MOMENT_KEYS:
-            out[k + "_text"] = when_words(now, v)
-        elif k == "date" and " " not in v:
-            d = dt.date.fromisoformat(v)
-            out["date_text"] = f"{WD_SHORT[d.weekday()]} {date_words(d)}"
-        elif k in ("start", "end") and " " not in v:
-            out[k + "_text"] = date_words(dt.date.fromisoformat(v))
+        if words:
+            out[k + "_text"] = words
+        if when:
+            out["when_text"] = when
+    if isinstance(out.get("days_left"), int) and "date_text" in out and isinstance(out.get("date"), str):
+        out["days_left"] = (dt.date.fromisoformat(out["date"]) - now.date()).days  # мероприятие, экзамен: после полуночи на день меньше
+    if out.get("status") in ("soon", "now", "over") and "start_text" in out and "end_text" in out:  # сессия (get_session)
+        start, end, today = dt.date.fromisoformat(out["start"]), dt.date.fromisoformat(out["end"]), now.date()
+        out["status"] = "over" if today > end else "now" if today >= start else "soon"
+        if out["status"] == "soon":
+            out["days_left"] = (start - today).days
+        else:
+            out.pop("days_left", None)
     return out
+
+
+def _words(k, v, now):
+    if not (isinstance(v, str) and ISO.fullmatch(v)):
+        return None
+    if k in MOMENT_KEYS:
+        return when_words(now, v)
+    if " " in v:
+        return None
+    d = dt.date.fromisoformat(v)
+    if k == "date":
+        return f"{WD_SHORT[d.weekday()]} {date_words(d)}"
+    return date_words(d) if k in ("start", "end") else None

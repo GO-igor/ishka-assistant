@@ -199,7 +199,7 @@ def cat_teacher(split):
     code = pick([c for c in SUBJECTS if c not in ("pe",)])
     alias = pick(SUBJECTS[code]["aliases"])
     lt = pick(["любой", "любой", "лекция", "практика", "лабораторная"])
-    tpl = pick(split_phr(["кто ведет {ws}", "кто у нас ведёт {w}по {sd}", "препод по {sd}?", "как зовут препода по {sd}{wp}",
+    tpl = pick(phrases("teacher", ["кто ведет {ws}", "кто у нас ведёт {w}по {sd}", "препод по {sd}?", "как зовут препода по {sd}{wp}",
                           "{s} {w}кто ведёт", "кто преподаёт {s}", "напомни кто ведет {ws}", "фамилия преподавателя по {sd}"], split))
     if not any(k in tpl for k in ("{w}", "{ws}", "{wp}")):  # тип занятия студент не назвал
         lt = "любой"
@@ -217,6 +217,8 @@ def cat_teacher(split):
         ans = f"{res['subject']}: {k} ведёт {v[0]}" + ("" if v[0].endswith(".") else ".")
     else:
         ans = f"{res['subject']}:\n" + "\n".join(f"• {k} — {', '.join(v)}" for k, v in t.items())
+    if t and ("корпус" in tpl or "КЦ" in tpl):  # раздел 11: «кто ведёт … в 10 корпусе» — по корпусам get_teacher не делит
+        ans += "\nПо корпусам преподавателей не делю — вот кого нашёл по этому предмету."
     return [system(now, p), {"role": "user", "content": q}, tc("get_teacher", args), tr("get_teacher", res),
             {"role": "assistant", "content": ans}]
 
@@ -274,7 +276,7 @@ def cat_food(split):
         return None
     explicit = rnd.random() < 0.3
     bld = b.current_or_last()["building"]
-    q = pick(split_phr(["где пожрать после пары", "есть где перекусить рядом?", "хочу есть, куда сходить",
+    q = pick(phrases("food", ["где пожрать после пары", "есть где перекусить рядом?", "хочу есть, куда сходить",
                         "где поесть на перемене", "успею перекусить до следующей?", "куда сбегать за едой",
                         "где тут можно быстро поесть", "голодный, что рядом есть?"], split))
     args = {}
@@ -1198,7 +1200,8 @@ SUBJ_W = {"eng": 22, "matlog": 10, "math": 10, "inf": 10, "python": 10, "hist": 
 SUBJ_ROOM_PHR = ["как дойти до кабинета {g}{b}", "как добраться до кабинета {g}{b}?", "где проходит {s}{b}?",
                  "в какой аудитории {s}{b}", "как добраться до аудитории по {d}{b}", "где у нас {s}{b}, как туда дойти",
                  "куда идти на пару по {d}{b}", "подскажи дорогу до кабинета {g}{b}", "{s}{b} это где вообще",
-                 "в каком кабинете {s}{b}?", "где пары по {d}{b}? и как дойти",
+                 "в каком кабинете {s}{b}?", "где пары по {d}{b}? и как дойти", "помоги найти кабинет {g}{b}",
+                 "объясни, как дойти до кабинета {g}{b}",
                  "как найти кабинет {g}{b}", "не могу найти, где {s}{b}, помоги"]
 TYPE_PL = {"ЛК": "лекции", "ПР": "практики", "ЛБ": "лабы"}
 B_LOC = {"ГК": "главном корпусе", "КЦ": "КЦ", "МКЦ": "МКЦ"}
@@ -1212,19 +1215,46 @@ def route_text(r):
     return "Точного маршрута внутри корпуса у меня пока нет 🙃"
 
 
+def profile_tail(res, p, what="аудитории"):
+    """Хвост ответа, когда профиль чего-то не знает: подгруппы, преподавателя английского, курсов (А)."""
+    out = ""
+    if "note" in res or "note_subgroup" in res:
+        sub, eng = "note_subgroup" in res, "note" in res
+        groups = "групп" if eng else "подгрупп"
+        if p.get("guest"):
+            who = ("твою подгруппу и преподавателя английского" if sub and eng else
+                   "твою подгруппу" if sub else "твоего преподавателя английского")
+            out += f"\n\nТы не вошёл в аккаунт, поэтому я не знаю {who} и показываю {what} всех {groups}. " \
+                   "Войди — и буду показывать только твои."
+        else:
+            who = ("не указаны подгруппа и преподаватель английского" if sub and eng else
+                   "не указана подгруппа" if sub else "не указан преподаватель английского")
+            out += f"\n\nВ твоём аккаунте {who}, поэтому я показываю {what} всех {groups}. Попроси того, кто выдавал " \
+                   "аккаунт, дописать — тогда буду показывать только твои."
+    if "note_adaptation" in res:
+        out += ("\n\nТы не вошёл в аккаунт, поэтому не знаю, ходишь ли ты на курсы (А): это аудитории для тех, кто на них ходит."
+                if p.get("guest") else "\n\nКурсы (А) у тебя в профиле не отмечены: это аудитории для тех, кто на них ходит.")
+    return out
+
+
+def next_line(n):
+    """«сегодня в 12:40: практика, 10 корпус, ауд. 201/3 (подгруппа 2)» — из next в ответе find_room."""
+    tag = f" (подгруппа {n['subgroup']})" if n.get("subgroup") else f" (ведёт {n['teacher']})" if n.get("teacher") else ""
+    return f"{n['when_text']}: {TYPE[n['type']]}{where(n)}{tag}"
+
+
 def subject_rooms_answer(res, p, said, bld, from_b):
-    """Ответ на find_room(subject=...): одна аудитория — где и маршрут; несколько — по строке на каждую."""
+    """Ответ на find_room(subject=...): одна аудитория — где и маршрут; несколько — по строке на каждую и ближайшая пара."""
     s, g, d = said
     if res.get("error") == "subject_not_found":
-        return f"Предмет «{s}» в расписании не нашёл 🤔 Как он называется полностью?"
+        return f"Предмета «{s}» в твоём расписании нет 🤔 Может, он называется иначе?"
     if res.get("error") == "no_room":
         return f"У {g} аудитории в расписании нет 🙂 Где проходят занятия, лучше уточни у преподавателя или старосты."
     rooms, seen = res["rooms"], set()
     fname = None if not from_b else from_b if from_b in ("ГК", "КЦ", "МКЦ") else f"{from_b} корпуса"
 
     def place(r):
-        out = f"{r['building'] + ' корпус' if r['building'].isdigit() else r['building']}, " + \
-              (f"ауд. {r['room']}" if r["room"][:1].isdigit() else r["room"])
+        out = where(r)[2:]  # «10 корпус, ауд. 201/3», «МКЦ, зал 1»
         if r["building"] not in seen:
             seen.add(r["building"])
             out += f" ({r['address']})"
@@ -1238,49 +1268,53 @@ def subject_rooms_answer(res, p, said, bld, from_b):
             return ", это корпус, где ты сейчас" if w == 0 else f", от {fname} идти примерно {w} мин"
         return " Ты как раз в этом корпусе 🙂" if w == 0 else f" От {fname} идти примерно {w} мин 🚶"
 
-    head = f"В {B_LOC.get(bld, f'{bld} корпусе')} пар по {d} нет 🤔 " if res.get("not_in_building") else ""
+    bn = res.get("building_not_found")
+    head = (f"В {B_LOC.get(bld, f'{bld} корпусе')} пар по {d} нет 🤔 " if res.get("not_in_building") else
+            f"Про {bn + ' корпус' if bn.isdigit() else bn} у меня данных нет 🤔 " if bn else "")
+    def groups(r):
+        sg = r.get("subgroups") or []
+        return f"{'подгруппа' if len(sg) == 1 else 'подгруппы'} {', '.join(map(str, sg))}" if sg else ""
+
     if len(rooms) == 1:
         r = rooms[0]
-        tag = f" (подгруппа {', '.join(map(str, r['subgroups']))})" if r.get("subgroups") else ""
-        ans = head + f"{cap(short(res['subject']))} — {place(r)}{tag}.{walk(r)}\n{route_text(r)}"
+        tag = f" ({groups(r)})" if r.get("subgroups") else ""
+        who = f" Ведёт {r['teacher']}." if r.get("teacher") else ""
+        ans = head + f"{cap(short(res['subject']))} — {place(r)}{tag}.{who}{walk(r)}\n{route_text(r)}"
     else:
         lines = []
         for r in rooms:
             label = r["teacher"] if r.get("teacher") else " и ".join(TYPE_PL[t] for t in r["types"])
-            if r.get("subgroups"):
-                sg = r["subgroups"]
-                label += f" ({'подгруппа' if len(sg) == 1 else 'подгруппы'} {', '.join(map(str, sg))})"
-            lines.append(f"• {label} — {place(r)}{walk(r, bullet=True)}. {route_text(r)}")
-        ans = (head + "Вот где они:" if head else f"{cap(short(res['subject']))}:") + "\n" + "\n".join(lines)
-    if "note" in res or "note_subgroup" in res:
-        sub, eng = "note_subgroup" in res, "note" in res
-        if p.get("guest"):
-            what = ("твою подгруппу и преподавателя английского" if sub and eng else
-                    "твою подгруппу" if sub else "твоего преподавателя английского")
-            ans += f"\n\nЯ показал аудитории для всех групп: ты не вошёл в аккаунт, поэтому я не знаю {what}. " \
-                   "Войди — и буду показывать только твои."
-        else:
-            what = ("не указаны подгруппа и преподаватель английского" if sub and eng else
-                    "не указана подгруппа" if sub else "не указан преподаватель английского")
-            ans += f"\n\nЯ показал аудитории для всех групп: в твоём аккаунте {what}. Попроси того, кто выдавал " \
-                   "аккаунт, дописать — тогда буду показывать только твои."
-    return ans
+            ds = r["days"]
+            tags = [x for x in (groups(r), ", ".join(ds[:-1]) + " и " + ds[-1] if len(ds) > 1 else ds[0]) if x]
+            lines.append(f"• {label} ({'; '.join(tags)}) — {place(r)}{walk(r, bullet=True)}. {route_text(r)}")
+        ans = (head + (f"Вот где пары по {d}:" if bn else "Вот где они:") if head else f"{cap(short(res['subject']))}:") + "\n" + "\n".join(lines)
+        if res.get("next"):
+            ans += f"\n\nБлижайшая пара — {next_line(res['next'])}."
+    return ans + profile_tail(res, p)
 
 
-def cat_subject_room(split):
+def cat_subject_room(split, force=None):
+    """force — редкая ветка наверняка: guest, building_other (в этом корпусе пар нет), building_unknown (корпуса нет в базе),
+    from (откуда идёт), no_room, unknown."""
     now = rand_now()
-    p = guest_profile() if rnd.random() < 0.15 else rand_profile()
+    p = guest_profile() if force == "guest" or rnd.random() < 0.15 else rand_profile()
     b = Backend(now, p)
-    code = rnd.choices(list(SUBJ_W), list(SUBJ_W.values()))[0]
+    code = {"no_room": "pe", "unknown": None}.get(force, rnd.choices(list(SUBJ_W), list(SUBJ_W.values()))[0])
+    if force in ("building_other", "building_unknown", "from") and code in (None, "pe"):
+        code = pick([c for c in SUBJ_W if c not in (None, "pe")])
     said = pick(SUBJ_SAY[code])
     args = {"subject": said[0]}
     bsay = ""
-    if code and code != "pe" and rnd.random() < 0.3:
+    if code and code != "pe" and (force == "building_other" or rnd.random() < 0.3):
         mine = sorted({r["building"] for r in b.find_room(subject=said[0]).get("rooms", [])})
-        bld = pick(mine) if rnd.random() < 0.7 else pick([x for x in ("ГК", "КЦ", "10", "19", "8") if x not in mine])
+        other = force == "building_other" or rnd.random() >= 0.7
+        bld = pick([x for x in ("ГК", "КЦ", "10", "19", "8") if x not in mine]) if other else pick(mine)
         bsay, args["building"] = " в " + B_LOC.get(bld, f"{bld} корпусе"), bld
+    if force == "building_unknown":
+        args["building"], bsay = pick([("4", " в 4 корпусе"), ("16", " в 16 корпусе"), ("11", " в 11 корпусе"),
+                                       ("корпус Б", " в корпусе Б"), ("спорткомплекс", " в спорткомплексе")])
     q = pick(split_phr(SUBJ_ROOM_PHR, split)).format(s=said[0], g=said[1], d=said[2], b=bsay)
-    from_b = pick(["ГК", "КЦ", "19", "10"]) if code and code != "pe" and rnd.random() < 0.15 else None
+    from_b = pick(["ГК", "КЦ", "19", "10"]) if code and code != "pe" and (force == "from" or rnd.random() < 0.15) else None
     if from_b:
         qm = "?" if q.endswith("?") else ""
         q = q.rstrip("?") + pick([f", я сейчас в {from_b if from_b in ('ГК', 'КЦ') else from_b + ' корпусе'}", f" (я в {from_b})"]) + qm
@@ -1290,6 +1324,204 @@ def cat_subject_room(split):
     res = b.find_room(**args)
     return [system(now, p), {"role": "user", "content": q}, tc("find_room", args), tr("find_room", res),
             {"role": "assistant", "content": subject_rooms_answer(res, p, said, args.get("building"), from_b)}]
+
+
+# ---------------- раздел 11: границы рядом с разделом 10 (с 21.10.2026) ----------------
+# После раздела 10 вопросы «предмет + день» («где сегодня английский») оказались ближе всего к find_room, хотя день знает
+# только get_schedule; «где экзамен» — к find_room, хотя это get_session. Здесь: предмет + день → get_schedule (ответ —
+# только про этот предмет), «когда ближайшая пара по …» → find_room (next), «где экзамен по …» → get_session, цепочки
+# «ответ инструмента → новая просьба к инструменту», «объяснил тему → напомни повторить».
+SUBJ_DAY_W = {"eng": 18, "matlog": 12, "math": 12, "inf": 10, "python": 12, "hist": 6, "intro": 8, "proj": 4, "kod": 3,
+              "pe": 5, "rus_a": 3, "math_a": 2, "eng_a": 2}
+SUBJ_DAY_PHR = ["где {vd} {s}?", "в какой аудитории {vd} {s}", "во сколько {vd} {s}?", "есть {vd} {s}?",
+                "{s} {vd} во сколько и где?", "{vd} будет {s}?", "где {vd} пара по {d}?", "в каком кабинете {vd} {s}?",
+                "{vd} {s} в какой аудитории?", "куда идти {vd} на пару по {d}?"]
+SUBJ_NEXT_PHR = ["когда ближайшая пара по {d}?", "когда следующая пара по {d}?", "когда у нас теперь {s}?",
+                 "во сколько и где следующая пара по {d}?", "а когда там ближайшая пара по {d}?", "ближайшая пара по {d} когда и где?"]
+EXAM_WHERE_PHR = ["где будет экзамен по {d}?", "в какой аудитории экзамен по {d}", "где сдаём {s}?", "куда идти на экзамен по {d}",
+                  "экз по {d} где проходит?", "экзамен по {d} в каком кабинете?"]
+SUBJ_DAY_EXTRA = {  # раздел 11: «поспать» рядом с расписанием, «голоден» рядом с перекусом, преподаватель с корпусом
+    "schedule_tomorrow": ["завтра можно поспать подольше?", "завтра к первой или можно поспать?",
+                          "во сколько мне завтра вставать, чтобы не опоздать?", "успею завтра выспаться перед парами?"],
+    "food": ["я голоден, где перекусить?", "умираю с голоду, что есть рядом?", "голодный как волк, куда сходить поесть?"],
+    "teacher": ["кто ведёт {ws} в 10 корпусе?", "кто у нас в главном корпусе ведёт {w}по {sd}", "кто в КЦ ведёт {ws}",
+                "препод по {sd} в 19 корпусе кто?"],
+}
+FOLLOW_DAY = {"tomorrow": ["а завтра?", "а на завтра что?", "а завтра какие?"],
+              "weekday": ["а {vd}?", "а что {vd}?", "а {vd} какие пары?"]}
+FOLLOW_DAY_EVAL = {"tomorrow": ["а завтра что по парам?"], "weekday": ["а {vd} что по парам?"]}
+
+
+def subj_said(code):
+    return pick(SUBJ_SAY[code])
+
+
+def cat_schedule_subject(split):
+    """«где сегодня английский» → get_schedule на этот день, в ответе — только пары этого предмета."""
+    now, p = rand_now(), rand_profile()
+    b = Backend(now, p)
+    code = rnd.choices(list(SUBJ_DAY_W), list(SUBJ_DAY_W.values()))[0]
+    said = subj_said(code)
+    kind = pick(["today", "today", "tomorrow", "weekday"])
+    if kind == "weekday":
+        days = [x for x in range(6) if x != now.weekday()]
+        with_class = [x for x in days if any(l["subject"] == code for l in b.lessons_on(
+            now.date() + dt.timedelta(days=(x - now.weekday()) % 7)))]
+        wd = pick(with_class) if with_class and rnd.random() < 0.75 else pick(days)
+        day, vd = WEEKDAYS[wd], WEEKDAYS_FUT[wd]
+    else:
+        day, vd = kind, {"today": "сегодня", "tomorrow": "завтра"}[kind]
+    q = pick(split_phr(SUBJ_DAY_PHR, split)).format(s=said[0], g=said[1], d=said[2], vd=vd)
+    if rnd.random() < 0.3:
+        q = cap(q)
+    res = b.get_schedule(day)
+    head = {"today": "Сегодня", "tomorrow": "Завтра"}.get(kind, cap(vd)) + f" ({res['date_text']})"
+    ls = [l for l in res["lessons"] if l["subject"] == SUBJECTS[code]["name"]]
+    sib = [l for l in res["lessons"] if code in ("eng", "math") and l["subject"] == SUBJECTS[code + "_a"]["name"]]
+    if res.get("holiday"):
+        ans = f"{head} нерабочий день, пар нет 🎉"
+    elif not ls and sib:  # обычного нет, а курс (А) у студента есть: не говорить «нет» про пару, которая идёт
+        lines = [f"{l['time'][:5]} — {TYPE[l['type']]}{where(l)}" + (f" ({l['teacher']})" if l.get("teacher") else "")
+                 for l in sib]
+        ans = (f"{head} обычных пар по {said[2]} нет, но есть {short(SUBJECTS[code + '_a']['name'])}: "
+               + (f"{lines[0]}." if len(lines) == 1 else "\n" + "\n".join(f"• {x}" for x in lines)))
+    elif not ls and code in ("rus_a", "eng_a", "math_a") and not p.get("adaptation") and (alt := [
+            l for l in Backend(now, dict(p, adaptation=True)).get_schedule(day)["lessons"]
+            if l["subject"] == SUBJECTS[code]["name"]]):  # пара есть, но профиль её прячет: не говорить просто «нет»
+        why = ("ты не вошёл в аккаунт, и я не знаю, ходишь ли ты на такие курсы" if p.get("guest")
+               else "у тебя в профиле курсы (А) не отмечены")
+        lines = [f"{l['time'][:5]} — {TYPE[l['type']]}{where(l)}" + (f" ({l['teacher']})" if l.get("teacher") else "")
+                 for l in alt]
+        ans = (f"{head} {said[1]} в твоём расписании нет: это курс (А), а {why}. Если ходишь на него: "
+               + (f"{lines[0]}." if len(lines) == 1 else "\n" + "\n".join(f"• {x}" for x in lines)))
+    elif not ls:
+        ans = f"{head} {said[1]} нет 🙂"
+    else:
+        lines = [f"{l['time'][:5]} — {TYPE[l['type']]}{where(l)}" + (f" ({l['teacher']})" if l.get("teacher") else "")
+                 + (f", подгруппа {l['subgroup']}" if l.get("subgroup") and not p.get("subgroup") else "") for l in ls]
+        ans = (f"{head} {short(SUBJECTS[code]['name'])}: {lines[0]}." if len(lines) == 1 else
+               f"{head} {short(SUBJECTS[code]['name'])}:\n" + "\n".join(f"• {x}" for x in lines))
+        mixed = (code == "eng" and "note" in res) or ("note_subgroup" in res and any(l.get("subgroup") for l in ls))
+        if mixed and p.get("guest"):
+            ans += ("\n\nЯ показал пары для всех подгрупп: ты не вошёл в аккаунт, поэтому я не знаю твою подгруппу и "
+                    "преподавателя английского. Войди — и буду показывать только твои пары.")
+        elif mixed:
+            ans += ("\n\nЯ показал пары для всех групп: в твоём аккаунте не указаны подгруппа или преподаватель английского. "
+                    "Попроси того, кто выдавал аккаунт, дописать их — тогда буду показывать только твои пары.")
+    return [system(now, p), {"role": "user", "content": q}, tc("get_schedule", {"day": day}), tr("get_schedule", res),
+            {"role": "assistant", "content": ans}]
+
+
+def cat_subject_next(split):
+    """«когда ближайшая пара по матлогике» → find_room(subject): next — когда и где, и маршрут туда."""
+    now = rand_now()
+    p = guest_profile() if rnd.random() < 0.15 else rand_profile()
+    b = Backend(now, p)
+    code = pick([c for c in SUBJ_DAY_W if c != "pe"])
+    said = subj_said(code)
+    q = pick(split_phr(SUBJ_NEXT_PHR, split)).format(s=said[0], g=said[1], d=said[2])
+    if rnd.random() < 0.3:
+        q = cap(q)
+    args = {"subject": said[0]}
+    res = b.find_room(**args)
+    n = res.get("next")
+    if not n and "note_adaptation" in res:
+        why = ("ты не вошёл в аккаунт, и я не знаю, ходишь ли ты на такие курсы" if p.get("guest")
+               else "у тебя в профиле курсы (А) не отмечены")
+        days = lambda ds: ", ".join(ds[:-1]) + " и " + ds[-1] if len(ds) > 1 else ds[0]
+        rooms = "; ".join(f"{where(r)[2:]} ({days(r['days'])})" for r in res["rooms"])
+        ans = (f"Пар по {said[2]} в твоём расписании нет: это курс (А), а {why}. "
+               f"Если ходишь на него, пары проходят здесь: {rooms}.")
+    elif not n:
+        ans = f"В твоём расписании на две недели вперёд пар по {said[2]} нет 🤔" + profile_tail(res, p, "пары")
+    else:
+        r = next((r for r in res["rooms"] if (r["building"], r["room"]) == (n.get("building"), n.get("room"))), None)
+        ans = f"Ближайшая пара по {said[2]} — {next_line(n)}." + (f"\n{route_text(r)}" if r else "") + profile_tail(res, p, "пары")
+    return [system(now, p), {"role": "user", "content": q}, tc("find_room", args), tr("find_room", res),
+            {"role": "assistant", "content": ans}]
+
+
+def cat_exam_where(split):
+    """«где будет экзамен по матлогике» → get_session(subject): аудитория, если её объявили, иначе честно «пока нет»."""
+    now, p = rand_now(), rand_profile()
+    b = Backend(now, p)
+    b.session = rand_session(now)
+    code = pick(EXAM_CODES + ["hist"])
+    said = subj_said(code)
+    q = pick(split_phr(EXAM_WHERE_PHR, split)).format(s=said[0], g=said[1], d=said[2])
+    args = {"subject": said[0]}
+    res = b.get_session(**args)
+    e = res["exams"][0] if res.get("exams") else None
+    if res.get("error") == "no_exam" or not e:
+        ans = f"По {said[2]} экзамена в сессии нет 🙂"
+    elif not e.get("date"):
+        ans = (f"Дату и аудиторию экзамена по {dat(short(e['subject']))} пока не объявили 🤷 "
+               f"Сессия начнётся {date_ru(dt.date.fromisoformat(res['start']))}.")
+    elif e.get("building"):
+        ans = f"{cap(e['kind'])} по {dat(short(e['subject']))} — {exam_line(e)}, {in_days(e['days_left'])} ⏳"
+    else:
+        ans = (f"{cap(e['kind'])} по {dat(short(e['subject']))} — {exam_line(e)}, {in_days(e['days_left'])}. "
+               "Аудиторию пока не объявили — уточни у старосты ближе к экзамену.")
+    return [system(now, p), {"role": "user", "content": q}, tc("get_session", args), tr("get_session", res),
+            {"role": "assistant", "content": ans}]
+
+
+def in_context(now, p, fn, split):
+    """fn с теми же временем и профилем, что у начала диалога (rand_now и rand_profile подменяем)."""
+    global rand_now, rand_profile
+    real = rand_now, rand_profile
+    rand_now, rand_profile = (lambda *a, **k: now), (lambda: dict(p))
+    try:
+        return fn(split)
+    finally:
+        rand_now, rand_profile = real
+
+
+def cat_tool_chain(split):
+    """Ответил по одному инструменту — студент сразу просит другое: «а завтра?», «кто ведёт матан?»."""
+    now, p = rand_now(), rand_profile()
+    fns, w = [c for c, _ in CHAIN_CATS], [x for _, x in CHAIN_CATS]
+    m1 = in_context(now, p, rnd.choices(fns, w)[0], split)
+    if not m1 or not m1[2].get("tool_calls") or m1[-1]["role"] != "assistant" or m1[-1]["content"].endswith("?"):
+        return None
+    global EXTRA_PHR
+    for _ in range(10):
+        if m1[2]["tool_calls"][0]["function"]["name"] == "get_schedule" and rnd.random() < 0.5:
+            kind = pick(["tomorrow", "weekday"])
+            EXTRA_PHR = {"schedule_" + kind: FOLLOW_DAY[kind] if split == "train" else FOLLOW_DAY_EVAL[kind]}
+            try:
+                m2 = in_context(now, p, cat_schedule, split)
+            finally:
+                EXTRA_PHR = {}
+        else:
+            m2 = in_context(now, p, rnd.choices(fns, w)[0], split)
+        same = lambda m: m[2]["tool_calls"][0]["function"]["name"]
+        if (m2 and m2[0] == m1[0] and m2[2].get("tool_calls") and m2[1]["content"] != m1[1]["content"]
+                and m2[2]["tool_calls"] != m1[2]["tool_calls"]
+                and not (same(m1) == same(m2) and same(m1) in ("get_session", "get_events"))):  # сессия и мероприятия случайные
+            return m1 + m2[1:]
+    return None
+
+
+def cat_explain_note(split):
+    """Объяснил тему — «напомни завтра в 18 повторить» → add_note с темой в тексте."""
+    now, p = rand_now(), rand_profile()
+    it = pick(held(bank("explain_bank"), split))
+    m = explain_example(it, pick(it["questions"][:-1] + it.get("extra", [])) if split == "train" else it["questions"][-1])
+    b = account_backend(now, p)
+    say_, at = pick([("завтра в 18", {"at": "tomorrow 18:00"}), ("вечером в 20:00", {"at": "20:00"}),
+                     ("через 2 часа", {"in_hours": 2}), ("в субботу в 12", {"at": "saturday 12:00"}),
+                     ("завтра утром в 9", {"at": "tomorrow 09:00"})])
+    q = pick(split_phr(["напомни {w} повторить эту тему", "супер, напомни {w} это повторить", "поставь напоминание {w}: повторить тему",
+                        "спасибо! напомни мне {w} повторить", "давай напоминалку {w}, чтобы повторить",
+                        "ок, а напомни {w} ещё раз пройтись по теме"], split)).format(w=say_)
+    what = f"повторить тему «{it['topic']}»"
+    args = {"text": cap(what)} | at
+    res = b.add_note(**args)
+    if not res.get("ok") or "fire_at" not in res:
+        return None
+    return [system(now, p)] + m[1:] + [{"role": "user", "content": q}, tc("add_note", args), tr("add_note", res),
+                                       {"role": "assistant", "content": reminder_answer(now, res, what)}]
 
 
 # ---------------- староста: объявления и Д/З группе; мероприятия и хакатоны ----------------
@@ -1435,7 +1667,7 @@ def cat_events(split):
     if form == "any":
         q = pick(split_phr(["какие мероприятия скоро?", "что интересного будет в универе?", "куда сходить из мероприятий?",
                             "есть какие-нибудь движухи в ТПУ?", "покажи ближайшие мероприятия", "что по мероприятиям?",
-                            "чем заняться кроме учёбы?", "какие ивенты скоро?"], split))
+                            "какие мероприятия есть кроме пар?", "какие ивенты скоро?"], split))
         args = {}
     elif form == "kind":
         q = pick(split_phr(["какие {pl} скоро?", "есть {pl}?", "будут какие-нибудь {pl}?", "покажи {pl}",
@@ -2564,7 +2796,8 @@ MAX_TOKENS = 4050  # обучение режет после 4096 токенов
 def est_tokens(m):
     """Длина диалога в токенах без токенизатора: описание инструментов — 3,2 символа на токен (у Qwen3 ровно 3,22),
     всё остальное — 2,2. Проверено токенизатором Qwen3 на всём датасете и 5700 диалогах удаления: оценка
-    не меньше настоящей длины (больше на 5–375 токенов)."""
+    почти всегда больше настоящей длины (на 5–375 токенов); с датами словами (*_text) бывает меньше, но не больше
+    чем на 0,4% — при MAX_TOKENS 4050 настоящая длина не выходит за 4096."""
     full = len(prompt_format.render(m))
     rest = len(prompt_format.render(m, []))  # без блока инструментов
     return (full - rest) / 3.2 + rest / 2.2
@@ -2615,6 +2848,8 @@ def tool_example(split):
 def cat_prefix_tool(split):
     """Сначала поболтали, потом просьба к инструменту."""
     m = tool_example(split)
+    while m[1]["content"].startswith("[авто]"):  # утренний брифинг приходит сам, до него не болтают
+        m = tool_example(split)
     return m[:1] + turns(pick(held(bank("chat_bank")["prefix"], split))["turns"]) + m[1:]
 
 
@@ -2640,7 +2875,17 @@ def eval_chat():
                                         follow=held_out(i) and bool(it.get("followups"))))
     rows += [cat_dialog("eval") for _ in held(bank("chat_bank")["dialogs"], "eval")]
     rows += [cat_prefix_tool("eval") for _ in range(12)] + [cat_tool_after("eval") for _ in range(8)]
+    random.Random(9292).shuffle(rows)  # вперемешку: --show-text 20 покажет и болтовню, и объяснения; свой генератор — rnd не сдвигается
     return rows
+
+
+# Раздел 11 (функции — выше, после раздела 10)
+CHAIN_CATS = [(cat_schedule, 5), (cat_room, 3), (cat_teacher, 3), (cat_session, 2), (cat_subject_room, 3), (cat_events, 1),
+              (cat_schedule_subject, 2)]
+
+
+SECTION_11 = [(cat_schedule_subject, 40, 5), (cat_subject_next, 15, 3), (cat_exam_where, 10, 2), (fits(cat_tool_chain), 34, 4),
+              (fits(cat_explain_note), 10, 2)]
 
 
 def build(n, split, cats=CATS):
@@ -2738,8 +2983,21 @@ if __name__ == "__main__":
         # 10) Аудитория по названию предмета (find_room с subject) — свой генератор. В eval — в конец файла, чтобы
         #     первые 240 примеров остались теми же, что в прошлых оценках
         rnd = random.Random(10100 if split == "train" else 10101)
-        data[split] += build(110 if split == "train" else 20, split, [(cat_subject_room, 1)])
+        forced = [r for f in ("guest", "building_other", "building_unknown", "from", "no_room", "unknown")
+                  for r in build(6 if split == "train" else 1, split, [(lambda sp, f=f: cat_subject_room(sp, f), 1)])]
+        data[split] += forced + build((110 if split == "train" else 20) - len(forced), split, [(cat_subject_room, 1)])
+        # 11) Границы рядом с разделом 10: предмет + день → get_schedule, «когда ближайшая пара по …», «где экзамен по …»,
+        #     цепочки из двух просьб к инструментам, «напомни повторить тему»; «поспать», «голоден», преподаватель с корпусом
+        #     (EXTRA_PHR). Свой генератор; eval — в конец data/eval.jsonl, после раздела 10
+        rnd = random.Random(11110 if split == "train" else 11111)
+        for cat, n_train, n_eval in SECTION_11:
+            data[split] += build(n_train if split == "train" else n_eval, split, [(cat, 1)])
         if split == "train":
+            teacher_b = lambda sp: (lambda m: m if "По корпусам" in m[-1]["content"] else None)(cat_teacher(sp))  # с непустым ответом
+            for key, cat, n in (("schedule_tomorrow", cat_schedule, 8), ("food", fits(cat_food), 6), ("teacher", teacher_b, 6)):
+                EXTRA_PHR = {key: SUBJ_DAY_EXTRA[key]}
+                data[split] += build(n, split, [(cat, 1)])
+            EXTRA_PHR = {}
             rnd.shuffle(data[split])
         rnd = main_rnd
         with open(root / f"{split}.jsonl", "w", encoding="utf-8") as f:

@@ -15,6 +15,7 @@ GUARD = Guard()  # запретные фразы: такие мероприят�
 HOLIDAYS = set(CAL.get("holidays", []))
 ENG_TEACHERS = sorted({l["teacher"] for l in LESSONS if l["subject"] == "eng" and l["teacher"]})
 WD_RU = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+WD_SHORT_RU = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 EAT_MINUTES = 15  # сколько нужно на сам перекус
 EVENT_KINDS = ["хакатон", "конференция", "олимпиада", "конкурс", "мастер-класс"]
 EVENT_PERIODS = {"week": 7, "month": 31, "all": None}  # сколько дней вперёд смотреть
@@ -37,8 +38,9 @@ def resolve_subject(text):
         for code, s in SUBJECTS.items():
             if code.endswith("_a") and base and base in s["name"].lower():
                 return code
-    # частичное совпадение; курсы (А) проверяем первыми, короткие алиасы («ИЯ», «вит») — только целым словом
-    for code in sorted(SUBJECTS, key=lambda c: "(а)" not in t or not c.endswith("_a")):
+    # частичное совпадение; курсы (А) — первыми, если в запросе есть «(А)», иначе последними («английский язык» —
+    # не «Английский язык (А)»); короткие алиасы («ИЯ», «вит») — только целым словом
+    for code in sorted(SUBJECTS, key=lambda c: c.endswith("_a") != ("(а)" in t)):
         s = SUBJECTS[code]
         if t in s["name"].lower():
             return code
@@ -56,9 +58,31 @@ def resolve_building(text):
         return None
     t = str(text).lower().replace("корпус", "").replace("№", "").strip()
     for code, b in BUILDINGS.items():
-        if t == code.lower() or t in b["aliases"] or str(text).lower() in b["aliases"]:
+        if t == code.lower() or t in b["aliases"] or str(text).lower() in b["aliases"] + [b["name"].lower()]:
             return code
-    return None
+    # «в 10 корпусе», «10-й корпус», «Учебный корпус № 8»: номер — только если кроме него в тексте одни «в», «учебный»,
+    # «корпус», «№», «-й» («общежитие 8», «остановка 10», «8 этаж» — не корпус)
+    raw = str(text).lower().replace("ё", "е")
+    m = re.fullmatch(r"\s*((в|во|из|от|с|со|до|к|ко|у|около|возле)\s+)?(учебн\w*\s+)?(корп\w*\.?\s*)?№?\s*([0-9]+)\s*"
+                     r"(-?\s*(й|ый|ой|ий|м|ом|ым|го|ого|му|ому|к|ка|ке|ку|кой|ки))?\s*(корп\w*\.?)?\s*", raw)
+    if m:
+        return m.group(5) if m.group(5) in BUILDINGS else None
+    if re.search(r"[0-9]", raw):
+        return None
+    # «в главном корпусе», «десятом», «кибернетический центр»: слово — та же основа, что у алиаса, с другим окончанием
+    # («девятом» — не «девятнадцатый», «киберспорт» — не «кибер центр»)
+    words = [w for w in re.findall(r"[а-яa-z]+", raw) if not w.startswith(("учебн", "корп"))]
+    words += [a + b for a, b in zip(words, words[1:])]  # «киберцентр» — это «кибер центр»
+
+    def same(w, a):
+        a = a.replace(" ", "") if w.startswith(a.replace(" ", "")[:6]) and " " in a else a.split()[0]
+        if len(a) <= 3:
+            return w == a
+        stem = a[:-2] if len(a) > 5 else a
+        return w.startswith(stem) and len(w) <= len(a) + 2
+
+    hits = {code for code, b in BUILDINGS.items() for a in b["aliases"] + [b["name"].lower()] for w in words if same(w, a)}
+    return hits.pop() if len(hits) == 1 else None
 
 
 def english_teacher(name):
@@ -75,6 +99,15 @@ def walk_minutes(a, b):
         if {w["a"], w["b"]} == {a, b}:
             return w["minutes"]
     return None
+
+
+def lesson_days(ls):
+    """В какие дни пары: ['вт по чётным', 'пт'] — день без пометки, если пара в обе недели."""
+    weeks = {}
+    for l in ls:
+        weeks.setdefault(l["weekday"], set()).add(l["week"])
+    return [WD_SHORT_RU[d - 1] + ("" if len(w) == 2 else " по чётным" if "even" in w else " по нечётным")
+            for d, w in sorted(weeks.items())]
 
 
 def route_to(b, room):
@@ -168,6 +201,11 @@ class Campus:
         return out
 
     def find_room(self, room=None, building=None, from_building=None, subject=None):
+        if room and not any(c.isdigit() for c in room):  # «кабинет английского» в room: аудиторий без номера нет
+            if subject or resolve_subject(room):
+                return self.subject_rooms(subject or room, building, from_building)
+            if resolve_building(building) is None:
+                return {"error": "room_not_found"}
         if subject and not room:
             return self.subject_rooms(subject, building, from_building)
         b = resolve_building(building)
@@ -177,8 +215,8 @@ class Campus:
                 b = cands.pop()
             elif len(cands) > 1:
                 return {"error": "ambiguous_room", "buildings": sorted(cands)}
-        if b is None:
-            return {"error": "room_not_found"}
+        if b is None:  # аудиторию не нашли: если назван предмет — ищем по нему
+            return self.subject_rooms(subject, building, from_building) if subject else {"error": "room_not_found"}
         out = {"building": b, "building_name": BUILDINGS[b]["name"], "address": BUILDINGS[b]["address"]}
         if room:
             out["room"] = room
@@ -190,7 +228,7 @@ class Campus:
 
     def subject_rooms(self, subject, building=None, from_building=None):
         """find_room с предметом вместо аудитории: где проходят пары этого предмета у студента (его подгруппа и
-        преподаватель английского из профиля) и как туда дойти. building — только в этом корпусе."""
+        преподаватель английского из профиля), как туда дойти и когда ближайшая пара. building — только в этом корпусе."""
         code = resolve_subject(subject)
         if not code:
             return {"error": "subject_not_found"}
@@ -202,19 +240,21 @@ class Campus:
             return {"subject": name, "error": "no_room"}  # физра: аудитории в расписании нет
         out = {"subject": name}
         b = resolve_building(building)
-        if b and not any(l["building"] == b for l in mine):
+        if building and b is None:
+            out["building_not_found"] = str(building)  # корпус не понял — показываем все аудитории
+        elif b and not any(l["building"] == b for l in mine):
             out["not_in_building"] = BUILDINGS[b]["name"]  # в этом корпусе пар нет — показываем, где есть
         elif b:
             mine = [l for l in mine if l["building"] == b]
         by_room = {}
-        for l in sorted(mine, key=lambda l: (("ЛК", "ПР", "ЛБ").index(l["type"]), l["building"], l["room"])):
+        for l in sorted(mine, key=lambda l: (("ЛК", "ПР", "ЛБ").index(l["type"]), l["building"], l["subgroup"] or 0, l["room"])):
             by_room.setdefault((l["building"], l["room"]), []).append(l)
         fb, rooms = resolve_building(from_building), []
         for (bc, room), ls in by_room.items():
             r = {"building": bc, "building_name": BUILDINGS[bc]["name"], "address": BUILDINGS[bc]["address"], "room": room,
-                 "types": list(dict.fromkeys(l["type"] for l in ls))}
+                 "types": list(dict.fromkeys(l["type"] for l in ls)), "days": lesson_days(ls)}
             if code == "eng" and not p.get("english_teacher"):
-                r["teacher"] = ls[0]["teacher"]
+                r["teacher"] = ", ".join(sorted({l["teacher"] for l in ls if l["teacher"]}))
             if not p.get("subgroup") and any(l["subgroup"] for l in ls):  # подгруппа не указана: чьи это лабы
                 r["subgroups"] = sorted({l["subgroup"] for l in ls if l["subgroup"]})
             r |= route_to(bc, room)
@@ -222,11 +262,32 @@ class Campus:
                 r["walk_minutes"] = walk_minutes(fb, bc)
             rooms.append(r)
         out["rooms"] = rooms
+        nxt = self.next_of(code)
+        if nxt:
+            out["next"] = nxt
+        if code in ADAPT and not p.get("adaptation"):
+            out["note_adaptation"] = "курсы (А) не отмечены в профиле: показаны аудитории для тех, кто на них ходит"
         if code == "eng" and not p.get("english_teacher"):
             out["note"] = "преподаватель английского не указан в профиле: показаны аудитории всех групп"
         if any("subgroups" in r for r in rooms):
             out["note_subgroup"] = "подгруппа не указана, лабы показаны для всех подгрупп"
         return out
+
+    def next_of(self, code):
+        """Ближайшая пара предмета в расписании студента (две недели вперёд): {"date", "time", "type", "building", "room"}."""
+        for add in range(0, 15):
+            d = self.now.date() + dt.timedelta(days=add)
+            for l in self.lessons_on(d):
+                if l["subject"] == code and self._at(d, l["start"]) > self.now:
+                    o = {"date": d.isoformat(), "time": l["start"], "type": l["type"]}
+                    if l["building"]:
+                        o |= {"building": l["building"], "room": l["room"]}
+                    if l["subgroup"] and not self.profile.get("subgroup"):  # чья это пара, если профиль не знает
+                        o["subgroup"] = l["subgroup"]
+                    if code == "eng" and not self.profile.get("english_teacher"):
+                        o["teacher"] = l["teacher"]
+                    return o
+        return None
 
     def get_teacher(self, subject, lesson_type="любой"):
         code = resolve_subject(subject)
@@ -246,7 +307,7 @@ class Campus:
         fb = resolve_building(from_building)
         d, l = self.next_lesson()
         if to_building or to_room:
-            tb = self.find_room(to_room, to_building).get("building")
+            tb = self.find_room(to_room, to_building).get("building") or resolve_building(to_building)
             target, start = {"room": to_room, "building": tb}, None
         else:
             if l is None:

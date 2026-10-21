@@ -5,7 +5,7 @@
     conversation.py — списки с номерами и удаление по ним; состояние разговора
     dates.py        — разбор дат и времени; даты в ответах инструментов ещё и словами (with_words)
 Генератор датасета вызывает те же инструменты, поэтому ответы инструментов в обучении настоящие."""
-import json, pathlib, re
+import functools, json, pathlib, re
 from campus import (Campus, BUILDINGS, ENG_TEACHERS, EVENTS, EVENT_KINDS, HOLIDAYS, LESSONS, SESSION, SUBJECTS, WD_RU,
                     resolve_building, resolve_subject, walk_minutes, week_parity)
 from conversation import Conversation
@@ -63,9 +63,9 @@ class Backend(Campus, Records, Starosta):
 def _with_words(tool):
     """Инструмент, в ответе которого даты ещё и словами («в пт 23 октября в 09:00»): и при call, и при прямом вызове
     (генератор датасета)."""
+    @functools.wraps(tool)
     def run(self, *a, **kw):
         return with_words(tool(self, *a, **kw), self.now)
-    run.__name__, run.__doc__ = tool.__name__, tool.__doc__
     return run
 
 

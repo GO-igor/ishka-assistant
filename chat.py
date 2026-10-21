@@ -19,6 +19,7 @@ chat.py сам собирает промпт ровно как при обуче
 """
 import argparse, datetime as dt, getpass, json, os, select, sys, unicodedata, urllib.error, urllib.request
 from backend import Backend
+from dates import with_words
 from conversation import Conversation
 from gen_dataset import system
 from guard import Guard
@@ -371,9 +372,12 @@ def tick():
     global now
     printed = False
     if not a.now:
-        now = dt.datetime.now().replace(second=0, microsecond=0)
+        day, now = now.date(), dt.datetime.now().replace(second=0, microsecond=0)
         backend.now = now
         msgs[0] = system(now, backend.profile)
+        if now.date() != day:  # после полуночи «завтра в 09:00» в прошлых ответах инструментов — уже «сегодня»
+            msgs[1:] = [tool_msg(m["name"], with_words(json.loads(m["content"]), now)) if m["role"] == "tool" else m
+                        for m in msgs[1:]]
     cur = None if a.now else store.account(account_id=acc["id"])  # notify.py мог отметить брифинг или подключить Telegram
     due = backend.due_reminders(delete=False)
     if cur and cur.get("tg_chat_id"):  # напоминание пришлёт бот; чат покажет его, только если бот не успел (не запущен)

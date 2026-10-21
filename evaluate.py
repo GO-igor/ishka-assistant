@@ -12,7 +12,7 @@ import argparse, collections, json, re, sys
 from unsloth import FastLanguageModel
 from prompt_format import CALL_THRESHOLD, answer_prefix, answer_text, parse_call, prompt_diff, tools_for  # как в chat.py
 from conversation import _nums, _stems  # номера и слова для delete_items — как их понимает бэкенд
-from campus import resolve_subject  # предмет — как его понимает бэкенд
+from campus import resolve_building, resolve_subject  # предмет и корпус — как их понимает бэкенд
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--model", default="out/lora")
@@ -41,9 +41,12 @@ if _diff:
           " другой формат. Пришли это сообщение.")
 
 
+MAX_NEW = 1024 if a.show_text else 256  # объяснения тем длинные: целиком их видно только с --show-text
+
+
 def _generate(prompt, **kw):
     ids = tok(prompt, return_tensors="pt").to(model.device)
-    out = model.generate(**ids, max_new_tokens=256, do_sample=False, temperature=None, top_p=None, top_k=None,
+    out = model.generate(**ids, max_new_tokens=MAX_NEW, do_sample=False, temperature=None, top_p=None, top_k=None,
                          return_dict_in_generate=True, **kw)
     seq = out.sequences if hasattr(out, "sequences") else out
     text = tok.decode(seq[0][ids["input_ids"].shape[1]:], skip_special_tokens=False)
@@ -96,6 +99,9 @@ def same_args(ga, pa):
         elif k == "subject":  # «английский язык» и «английский», «матан» и «математика»: бэкенд поймёт одинаково
             if norm(v) != norm(pa[k]) and (resolve_subject(v) is None or resolve_subject(v) != resolve_subject(pa[k])):
                 return False
+        elif k in ("building", "from_building"):  # «главный корпус» и «ГК», «10 корпус» и «10»
+            if norm(v) != norm(pa[k]) and (resolve_building(v) is None or resolve_building(v) != resolve_building(pa[k])):
+                return False
         elif k == "numbers":  # [4, 2] и [2, 4], "2" и [2] — одно и то же
             if _nums(pa[k]) is None or sorted(_nums(v) or []) != sorted(_nums(pa[k])):
                 return False
@@ -117,26 +123,30 @@ def error(text):  # первые --max-errors печатаем сразу, ос�
 lines = list(open(a.data, encoding="utf-8"))
 lines = lines[: a.limit or len(lines)]
 
-# «Я больше по учёбе», «тут я не помощник» — так Ишка отвечал до раздела 9 датасета на всё не про учёбу
-REFUSAL = re.compile(r"не умею|не помощник|больше по уч[её]б|не объясняю|не могу помочь|не подскажу|не по адресу|"
-                     r"лучше спроси|это не ко мне|не моя тема", re.I)
+# «Я больше по учёбе», «тут я не помощник» — так Ишка отвечал до раздела 9 датасета на всё не про учёбу. Только эти
+# заготовки: «смотреть я не умею, но…» или «лучше спросить в деканате» — нормальный ответ, не отказ
+REFUSAL = re.compile(r"больше по уч[её]б|я не помощник|темы я не объясняю|объяснять темы я не умею|это не ко мне|"
+                     r"не моя тема|не по адресу", re.I)
 refusals = [0, 0]  # отказов, ответов текстом там, где в датасете ответ по существу
 shown = 0
 
 
 def check_text(q, gold, text):
-    """Ответ текстом: не отказ ли там, где в датасете ответ по существу. Первые --show-text ответов печатает."""
+    """Ответ текстом: не отказ ли там, где в датасете ответ по существу (тогда True — ответ не засчитывается).
+    Первые --show-text ответов печатает."""
     global shown
     t = answer_text(text)
     if shown < a.show_text:
         shown += 1
-        print(f"[ответ] {q!r}\n  {t[:700]}\n", flush=True)
+        print(f"[ответ] {q!r}\n  {t[:1500]}\n", flush=True)
     if REFUSAL.search(gold.get("content") or ""):
-        return
+        return False
     refusals[1] += 1
     if REFUSAL.search(t):
         refusals[0] += 1
         error(f"[отказ] {q!r}: в датасете ответ по существу, а Ишка отказал\n  ответ: {raw(text, 300)}")
+        return True
+    return False
 
 
 def print_refusals():
@@ -229,11 +239,9 @@ def step3():
                           f"{call and call.get('name')} {pa if call else ''} (P(<tool_call>) = {pct(p)})\n  сырой ответ: {raw(text)}")
             else:
                 key = "ответ текстом"
-                good = call is None and bool(answer_text(text))
+                good = call is None and bool(answer_text(text)) and not check_text(msgs[j]["content"], gold, text)
                 g_ok += gcall is None
-                if call is None:
-                    check_text(msgs[j]["content"], gold, text)
-                if not good:
+                if call is not None or not answer_text(text):
                     error(f"[шаг 3, ждали текст] {msgs[j]['content']!r}: получили {call and call.get('name')} "
                           f"(P(<tool_call>) = {pct(p)})\n  сырой ответ: {raw(text)}")
             ok += good
@@ -269,8 +277,10 @@ for line in lines:
     n += 1
     if gold.get("tool_calls"):
         key = gold["tool_calls"][0]["function"]["name"]
-    else:  # текстом: либо уточняющий вопрос (дальше в диалоге будет вызов), либо обычный ответ
-        key = "уточняющий вопрос" if any(m.get("tool_calls") for m in msgs[3:]) else "без инструмента"
+    else:  # текстом: уточняющий вопрос или объяснение темы (дальше в диалоге будет вызов), либо обычный ответ
+        key = ("без инструмента" if not any(m.get("tool_calls") for m in msgs[3:]) else
+               "болтовня, потом инструмент" if "eval_chat" in a.data else
+               "объяснение, потом инструмент" if len(gold["content"]) >= 300 else "уточняющий вопрос")
     per[key] += 1
     before = args_ok
     if gold.get("tool_calls"):
@@ -291,15 +301,14 @@ for line in lines:
         else:
             error(f"[инструмент] {msgs[1]['content']!r}: ждали {g['name']}, получили {call and call.get('name')}"
                   f" (P(<tool_call>) = {pct(p)})\n  сырой ответ: {raw(text)}")
-    else:  # здесь правильно — ответить текстом, без вызова
+    else:  # здесь правильно — ответить текстом, без вызова (и не отказом, если в датасете ответ по существу)
+        refused = call is None and check_text(msgs[1]["content"], gold, text)
         name_ok += call is None
-        args_ok += call is None
+        args_ok += call is None and not refused
         g_name_ok += gcall is None
         if call:
             error(f"[лишний вызов] {msgs[1]['content']!r}: ждали ответ текстом, получили {call.get('name')}"
                   f" (P(<tool_call>) = {pct(p)})\n  сырой ответ: {raw(text)}")
-        else:
-            check_text(msgs[1]["content"], gold, text)
     hit[key] += args_ok - before
     if n % 10 == 0 or n == len(lines):
         print(f"  проверено {n}/{len(lines)}", file=sys.stderr, flush=True)
@@ -308,7 +317,7 @@ if 0 <= a.max_errors < len(errors):
     print(f"... не показано ошибок: {len(errors) - a.max_errors} (показать все: --max-errors -1)")
 
 print(f"\nПримеров: {n}\nИнструмент выбран верно: {name_ok / n:.0%} (жадным выбором токена, как раньше: {g_name_ok / n:.0%})"
-      f"\nИнструмент и аргументы верно: {args_ok / n:.0%}")
+      f"\nИнструмент и аргументы верно: {args_ok / n:.0%} (ответ-отказ там, где ждали ответ по существу, — не верно)")
 print_refusals()
 print("\nПо инструментам (инструмент и аргументы верно):")
 for k, v in per.most_common():
