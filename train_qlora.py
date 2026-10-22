@@ -80,8 +80,8 @@ def load(path):
     # Схема инструментов попадает в system-промпт так же, как на проде (у студента без рассылок группе)
     return Dataset.from_list([{"text": tok.apply_chat_template(m, tools=tools_for(m), tokenize=False)} for m in rows])
 
-# Для кривой loss хватит 40 примеров eval: все 303 заметно тормозят обучение.
-# Качество по всем 303 потом считает evaluate.py.
+# Для кривой loss хватит 40 примеров eval: все 321 заметно тормозят обучение.
+# Качество по всем 321 потом считает evaluate.py.
 ds = {"train": load("data/train.jsonl"), "eval": load("data/eval.jsonl").select(range(40))}
 
 trainer = SFTTrainer(
