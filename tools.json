@@ -387,5 +387,34 @@
     }
    }
   }
+ },
+ {
+  "type": "function",
+  "function": {
+   "name": "get_tpu_info",
+   "description": "Справка о ТПУ и ИШИТР. Разделы: university — вуз, school — ИШИТР, dormitory — общежития, scholarship — стипендии и матпомощь, student_life — библиотека, студенческий, организации, военка, сайты, sport_health — физкультура, спорт, поликлиника, психолог, documents — справки, академ, перевод, пересдачи, отчисление, contacts — контакты, admission — поступление.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "topic": {
+      "type": "string",
+      "enum": [
+       "university",
+       "school",
+       "dormitory",
+       "scholarship",
+       "student_life",
+       "sport_health",
+       "documents",
+       "contacts",
+       "admission"
+      ]
+     }
+    },
+    "required": [
+     "topic"
+    ]
+   }
+  }
  }
 ]

@@ -4,6 +4,7 @@
     starosta.py     — объявления и Д/З от старосты
     conversation.py — списки с номерами и удаление по ним; состояние разговора
     dates.py        — разбор дат и времени; даты в ответах инструментов ещё и словами (with_words)
+    university.py   — справка о ТПУ и ИШИТР: вуз, общежития, стипендии, документы, контакты (db/university.json)
 Генератор датасета вызывает те же инструменты, поэтому ответы инструментов в обучении настоящие."""
 import functools, json, pathlib, re
 from campus import (Campus, BUILDINGS, ENG_TEACHERS, EVENTS, EVENT_KINDS, HOLIDAYS, LESSONS, SESSION, SUBJECTS, WD_RU,
@@ -12,13 +13,14 @@ from conversation import Conversation
 from dates import WEEKDAYS, parse_day, with_words
 from records import LIMITS, Records
 from starosta import POST_LIMIT, Starosta
+from university import University
 
 SPEC = {t["function"]["name"]: t["function"]["parameters"]
         for t in json.loads((pathlib.Path(__file__).parent / "tools.json").read_text(encoding="utf-8"))}
 DELETE_TOOLS = {"delete_items", "group_delete_post"}  # только они отвечают на «да» к «удалить все?»
 
 
-class Backend(Campus, Records, Starosta):
+class Backend(Campus, Records, Starosta, University):
     def __init__(self, now, profile, store=None, account_id=None, conv=None):
         """profile: subgroup, english_teacher, adaptation, у вошедшего ещё group и role (student|starosta) — store.profile.
         Без store и account_id работают только справочные инструменты. conv — разговор (Conversation): сайт хранит
