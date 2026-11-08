@@ -1,5 +1,5 @@
 """Даты и время в аргументах инструментов — один разбор для всех: день («today», «friday», «2026-10-20»,
-«15 января», «15.01», «in 3 days») и момент («18:00», «tomorrow 9:00», «friday 18:00», «2026-10-20 18:00»).
+«15 января», «15.01», «in 3 days») и момент («18:00», «tomorrow 9:00», «friday 18:00», «2026-10-20 18:00», «in 2 hours»).
 И обратно: даты из ответов инструментов словами (with_words) — день недели модель не считает, а переписывает."""
 import datetime as dt, re
 
@@ -49,6 +49,11 @@ def parse_day(now: dt.datetime, s, future=False) -> dt.date:
 def parse_at(now: dt.datetime, s):
     """Момент: (datetime, указано ли время). Без дня — ближайшее такое время (сегодня или завтра); день недели
     со временем, которое уже прошло, — через неделю. Без времени — конец дня. Иначе ValueError."""
+    # «через час»: модель иногда пишет at="in 1 hour" вместо in_hours (так ответила 3-я эпоха обучения на 4060)
+    m = re.fullmatch(r"in (\d{1,4}) (min|mins|minutes?|h|hrs?|hours?)", str(s).strip().lower())
+    if m:
+        n = int(m.group(1))
+        return now + (dt.timedelta(hours=n) if m.group(2)[0] == "h" else dt.timedelta(minutes=n)), True
     parts = str(s).strip().lower().split()
     t = None
     if parts and re.fullmatch(r"\d{1,2}:\d{2}", parts[-1]):
